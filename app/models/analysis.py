@@ -45,6 +45,21 @@ class MatcherResultResponse(BaseModel):
     candidates_count: int = 0
 
 
+class ReviewFindingResponse(BaseModel):
+    axis: str
+    severity: str          # critical | warning | info
+    note: str
+    clause: Optional[str] = None
+
+
+class ReviewResponse(BaseModel):
+    traffic_light: str                      # green | yellow | red
+    summary: str = ""
+    findings: list[ReviewFindingResponse] = []
+    error: Optional[str] = None
+    truncated: bool = False
+
+
 class AnalysisResponse(BaseModel):
     traffic_light: Literal["green", "yellow", "no_match"]
     anchors: list[AnchorResponse]
@@ -56,6 +71,28 @@ class AnalysisResponse(BaseModel):
     pipeline_debug: dict[str, Any]
     fingerprint: Optional[dict[str, Any]] = None
     detected_signer_id: Optional[str] = None
+    review: Optional[ReviewResponse] = None
+
+    @staticmethod
+    def _review_from_dict(rev: Optional[dict]) -> Optional["ReviewResponse"]:
+        if not rev:
+            return None
+        findings = [
+            ReviewFindingResponse(
+                axis=f.get("axis", "other"),
+                severity=f.get("severity", "info"),
+                note=f.get("note", ""),
+                clause=f.get("clause"),
+            )
+            for f in rev.get("findings", [])
+        ]
+        return ReviewResponse(
+            traffic_light=rev.get("traffic_light", "yellow"),
+            summary=rev.get("summary", ""),
+            findings=findings,
+            error=rev.get("error"),
+            truncated=rev.get("truncated", False),
+        )
 
     @classmethod
     def from_result(cls, result) -> "AnalysisResponse":
@@ -118,6 +155,7 @@ class AnalysisResponse(BaseModel):
             pipeline_debug=result.pipeline_debug or {},
             fingerprint=getattr(result, "fingerprint", None),
             detected_signer_id=getattr(result, "detected_signer_id", None),
+            review=cls._review_from_dict(getattr(result, "review", None)),
         )
 
 

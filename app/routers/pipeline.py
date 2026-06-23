@@ -30,6 +30,7 @@ async def analyze_document(
     sf: SignFinderDep,
     file: UploadFile = File(..., description="PDF файл договора"),
     language: str | None = Form(None, description="Язык: ru, en, pl. None = автодетект"),
+    with_review: bool = Form(False, description="Pre-flight ревью договора (доп. LLM-вызов)"),
     async_mode: bool = Form(False, alias="async", description="true = async, вернёт job_id"),
 ):
     """Полный анализ документа: матчинг шаблонов + поиск мест подписи."""
@@ -37,7 +38,11 @@ async def analyze_document(
         from app.job_storage import create_job, save_job_input_pdf
         from app.tasks import enqueue_job
         pdf_bytes = await file.read()
-        job = create_job("analyze", metadata={"language": language, "filename": file.filename or "document.pdf"})
+        job = create_job("analyze", metadata={
+            "language": language,
+            "filename": file.filename or "document.pdf",
+            "with_review": with_review,
+        })
         job_id = job["job_id"]
         save_job_input_pdf(job_id, pdf_bytes)
         enqueue_job(job_id, f"/v1/internal/process-analyze-job/{job_id}")
@@ -45,7 +50,12 @@ async def analyze_document(
 
     pdf_bytes = await file.read()
     try:
-        result = sf.analyze(pdf_bytes, language=language, filename=file.filename or "document.pdf")
+        result = sf.analyze(
+            pdf_bytes,
+            language=language,
+            filename=file.filename or "document.pdf",
+            with_review=with_review,
+        )
     except Exception as e:
         logger.warning("analyze failed (broken/unreadable PDF): %s", e)
         return AnalysisResponse(
@@ -67,6 +77,7 @@ async def analyze_batch(
     sf: SignFinderDep,
     files: list[UploadFile] = File(..., description="Список PDF файлов (до 100)"),
     language: str | None = Form(None, description="Язык для всех файлов. None = автодетект"),
+    with_review: bool = Form(False, description="Pre-flight ревью для каждого файла"),
 ) -> BatchAnalysisResponse:
     """Пакетный анализ. Ошибка одного файла не роняет батч. Лимит 100."""
     import time
@@ -80,7 +91,7 @@ async def analyze_batch(
         t0 = time.monotonic()
         try:
             pdf_bytes = await f.read()
-            result = sf.analyze(pdf_bytes, language=language, filename=fname)
+            result = sf.analyze(pdf_bytes, language=language, filename=fname, with_review=with_review)
             elapsed = int((time.monotonic() - t0) * 1000)
             analysis = AnalysisResponse.from_result(result)
             items.append(BatchItemResponse(filename=fname, elapsed_ms=elapsed, analysis=analysis, error=None))
@@ -215,3 +226,47 @@ async def preview_page(
         logger.exception("preview failed")
         raise HTTPException(status_code=422, detail=str(e))
     return Response(content=png_bytes, media_type="image/png")
+
+
+@router.post("/review")
+async def review_document(
+    _: ApiKeyDep,
+    sf: SignFinderDep,
+    file: UploadFile = File(..., description="PDF файл договора"),
+    language: str | None = Form(None, description="Язык: ru/en/pl/mk. None = автодетект"),
+):
+    """Pre-flight ревью договора БЕЗ поиска подписи.
+
+    Проверяет целостность договора через LLM, возвращает замечания.
+    Независимо от /analyze — можно вызвать отдельно.
+    """
+    from app.models.analysis import ReviewResponse
+    pdf_bytes = await file.read()
+
+    try:
+        from signfinder.pdf import parse_pdf_bytes
+        doc = parse_pdf_bytes(pdf_bytes, filename=file.filename or "document.pdf")
+    except Exception as e:
+        logger.warning("review: parse failed: %s", e)
+        return ReviewResponse(traffic_light="yellow", error=f"parse failed: {e}")
+
+    # Язык: из параметра или автодетект
+    lang = language
+    if not lang:
+        try:
+            from signfinder.pdf import detect_language_fast
+            lang = detect_language_fast(doc) or "ru"
+        except Exception:
+            lang = "ru"
+
+    full_text = "\n".join(p.text for p in doc.pages)
+    page_count = len(doc.pages)
+
+    try:
+        review = sf.review(full_text, lang, page_count=page_count)
+    except Exception as e:
+        logger.exception("review failed")
+        return ReviewResponse(traffic_light="yellow", error=str(e))
+
+    rev = review.to_dict()
+    return AnalysisResponse._review_from_dict(rev)

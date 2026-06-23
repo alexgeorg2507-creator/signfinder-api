@@ -44,8 +44,9 @@ def process_analyze_job(job_id: str) -> None:
         meta = job.get("metadata") or {}
         language = meta.get("language")
         filename = meta.get("filename", "document.pdf")
+        with_review = meta.get("with_review", False)
 
-        result = sf.analyze(pdf_bytes, language=language, filename=filename)
+        result = sf.analyze(pdf_bytes, language=language, filename=filename, with_review=with_review)
         result_dict = _serialize_result(result)
 
         update_job_status(job_id, "completed", result=result_dict)
