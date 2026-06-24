@@ -23,6 +23,20 @@ router = APIRouter()
 
 _SIGN_MODE_DEFAULT = {"use_signature": True, "use_marker": False, "marker_color": "pink"}
 
+# Единый лимит размера документа по всей системе (v1.20.4).
+_MAX_DOC_SIZE_MB = 30
+_MAX_DOC_SIZE_BYTES = _MAX_DOC_SIZE_MB * 1024 * 1024
+
+
+def _check_doc_size(pdf_bytes: bytes, filename: str) -> None:
+    """Проверка размера документа. 413 если превышен лимит."""
+    if len(pdf_bytes) > _MAX_DOC_SIZE_BYTES:
+        size_mb = len(pdf_bytes) / (1024 * 1024)
+        raise HTTPException(
+            status_code=413,
+            detail=f"Документ '{filename}' — {size_mb:.1f} МБ, лимит {_MAX_DOC_SIZE_MB} МБ.",
+        )
+
 
 @router.post("/analyze")
 async def analyze_document(
@@ -38,6 +52,7 @@ async def analyze_document(
         from app.job_storage import create_job, save_job_input_pdf
         from app.tasks import enqueue_job
         pdf_bytes = await file.read()
+        _check_doc_size(pdf_bytes, file.filename or "document.pdf")
         job = create_job("analyze", metadata={
             "language": language,
             "filename": file.filename or "document.pdf",
@@ -49,6 +64,7 @@ async def analyze_document(
         return {"job_id": job_id, "status": "pending", "poll_url": f"/v1/jobs/{job_id}"}
 
     pdf_bytes = await file.read()
+    _check_doc_size(pdf_bytes, file.filename or "document.pdf")
     try:
         result = sf.analyze(
             pdf_bytes,
@@ -91,6 +107,7 @@ async def analyze_batch(
         t0 = time.monotonic()
         try:
             pdf_bytes = await f.read()
+            _check_doc_size(pdf_bytes, fname)
             result = sf.analyze(pdf_bytes, language=language, filename=fname, with_review=with_review)
             elapsed = int((time.monotonic() - t0) * 1000)
             analysis = AnalysisResponse.from_result(result)
@@ -116,6 +133,7 @@ async def sign_document(
 ):
     """Наложить подпись/маркер по якорям. Режим задаётся через /settings/sign-mode."""
     pdf_bytes = await file.read()
+    _check_doc_size(pdf_bytes, file.filename or "document.pdf")
 
     try:
         anchors = json.loads(anchors_json)
@@ -242,6 +260,7 @@ async def review_document(
     """
     from app.models.analysis import ReviewResponse
     pdf_bytes = await file.read()
+    _check_doc_size(pdf_bytes, file.filename or "document.pdf")
 
     try:
         from signfinder.pdf import parse_pdf_bytes
