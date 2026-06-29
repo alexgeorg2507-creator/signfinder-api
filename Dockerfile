@@ -19,7 +19,9 @@ RUN pip install --no-cache-dir \
     "uvicorn[standard]>=0.32" \
     "python-multipart>=0.0.12" \
     "httpx>=0.27" \
-    "pydantic>=2.5"
+    "pydantic>=2.5" \
+    "firebase-admin>=6.5" \
+    "asyncpg>=0.29"
 
 # Копируем код
 COPY app/ ./app/
