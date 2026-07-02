@@ -5,26 +5,35 @@ IB:
 - Every SQL filters by user_id from token (WHERE user_id = $from_jwt)
 - 404 instead of 403 for other-user resources
 - extra='forbid' on all Pydantic input models
+- M3: documents processed in-memory only, never persisted;
+  prompt-injection isolation is in sf.analyze() (signfinder-core)
 """
 from __future__ import annotations
 
 import base64
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Annotated, Any
+from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict
 
 from app.auth import FirebaseToken
 from app.db import get_pool
+from app.dependencies import SignFinderDep
+from app.models.analysis import AnalysisResponse
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Cabinet"])
 
 _MAX_SIG_UPLOAD = 5 * 1024 * 1024   # 5 MB raw upload
 _MAX_SIG_PNG    = 500 * 1024         # 500 KB processed PNG
+_MAX_DOC_SIZE   = 5 * 1024 * 1024   # 5 MB cabinet doc limit
+_MAX_DOC_PAGES  = 3
+_MONTHLY_LIMIT  = 10
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -34,7 +43,6 @@ async def _get_or_create_user(token: FirebaseToken) -> dict:
     uid: str = token["uid"]
     email: str = token.get("email", "")
     verified: bool = token.get("email_verified", False)
-
     pool = get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -52,6 +60,82 @@ async def _get_or_create_user(token: FirebaseToken) -> dict:
 
 
 UserDep = Annotated[dict, Depends(_get_or_create_user)]
+
+
+def _current_period() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m")
+
+
+async def _get_usage_count(uid: str) -> int:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        val = await conn.fetchval(
+            "SELECT doc_count FROM usage_counters WHERE user_id=$1 AND period=$2",
+            uid, _current_period(),
+        )
+    return val or 0
+
+
+async def _check_and_inc_usage(uid: str) -> int:
+    """Atomically check monthly limit and increment. Raises 429 if at limit."""
+    period = _current_period()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # Ensure row exists so FOR UPDATE has something to lock
+            await conn.execute(
+                """
+                INSERT INTO usage_counters (user_id, period, doc_count)
+                VALUES ($1, $2, 0)
+                ON CONFLICT DO NOTHING
+                """,
+                uid, period,
+            )
+            current = await conn.fetchval(
+                "SELECT doc_count FROM usage_counters WHERE user_id=$1 AND period=$2 FOR UPDATE",
+                uid, period,
+            ) or 0
+            if current >= _MONTHLY_LIMIT:
+                raise HTTPException(
+                    status_code=429,
+                    detail=(
+                        f"Лимит исчерпан: {_MONTHLY_LIMIT} документов в месяц "
+                        "на бесплатном тарифе."
+                    ),
+                )
+            new_count = await conn.fetchval(
+                """
+                UPDATE usage_counters SET doc_count = doc_count + 1
+                WHERE user_id=$1 AND period=$2
+                RETURNING doc_count
+                """,
+                uid, period,
+            )
+    return new_count or 1
+
+
+def _check_doc(pdf_bytes: bytes, filename: str) -> None:
+    """Validate size and page count. Raises 413/422."""
+    if len(pdf_bytes) > _MAX_DOC_SIZE:
+        mb = len(pdf_bytes) / (1024 * 1024)
+        raise HTTPException(
+            status_code=413,
+            detail=f"Файл слишком большой ({mb:.1f} МБ). Лимит кабинета: 5 МБ.",
+        )
+    try:
+        import fitz
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        n = len(doc)
+        doc.close()
+    except HTTPException:
+        raise
+    except Exception:
+        return  # unreadable PDF — let the pipeline report the error
+    if n > _MAX_DOC_PAGES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Слишком много страниц ({n}). Лимит кабинета: {_MAX_DOC_PAGES} страницы.",
+        )
 
 
 # ── models ────────────────────────────────────────────────────────────────────
@@ -83,6 +167,12 @@ class PartyIn(BaseModel):
 class PartyOut(BaseModel):
     name: str
     role: str
+
+
+class UsageOut(BaseModel):
+    doc_count: int
+    limit: int
+    period: str
 
 
 # ── profile ───────────────────────────────────────────────────────────────────
@@ -232,3 +322,166 @@ async def put_party(body: PartyIn, user: UserDep) -> Any:
             uid, body.name, body.role,
         )
     return PartyOut(name=body.name, role=body.role)
+
+
+# ── usage ─────────────────────────────────────────────────────────────────────
+
+@router.get("/me/usage", response_model=UsageOut)
+async def get_usage(user: UserDep) -> UsageOut:
+    """Return current-month document usage for this user."""
+    uid = user["firebase_uid"]
+    count = await _get_usage_count(uid)
+    return UsageOut(doc_count=count, limit=_MONTHLY_LIMIT, period=_current_period())
+
+
+# ── M3: cabinet pipeline ──────────────────────────────────────────────────────
+
+@router.post("/me/analyze")
+async def me_analyze(
+    user: UserDep,
+    sf: SignFinderDep,
+    file: UploadFile = File(...),
+) -> Any:
+    """Analyze a contract (JWT-protected, 5 MB / 3 pages / 10 docs/month).
+
+    Document is processed in RAM only — never written to disk, DB, or GCS.
+    Prompt-injection isolation handled by signfinder-core:
+      - document text in user role with untrusted-input wrapper
+      - system instructions in separate system role
+      - LLM output validated against JSON schema
+      - LLM-produced anchors verified against actual PDF text
+    """
+    uid = user["firebase_uid"]
+
+    # Check monthly limit before burning LLM tokens
+    count = await _get_usage_count(uid)
+    if count >= _MONTHLY_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Лимит исчерпан: {_MONTHLY_LIMIT} документов в месяц на бесплатном тарифе.",
+        )
+
+    pdf_bytes = await file.read()
+    _check_doc(pdf_bytes, file.filename or "document.pdf")
+
+    try:
+        result = sf.analyze(
+            pdf_bytes,
+            filename=file.filename or "document.pdf",
+        )
+    except Exception as e:
+        logger.warning("me/analyze failed for user %s: %s", uid, e)
+        return AnalysisResponse(
+            traffic_light="no_match",
+            anchors=[],
+            matches=[],
+            matched_template=None,
+            applied_template_id=None,
+            our_side=None,
+            error=str(e),
+            pipeline_debug={},
+        )
+    return AnalysisResponse.from_result(result)
+
+
+@router.post("/me/sign")
+async def me_sign(
+    user: UserDep,
+    sf: SignFinderDep,
+    file: UploadFile = File(...),
+    anchors_json: str = Form(...),
+    signature_scale: float = Form(1.0),
+) -> Response:
+    """Sign a contract using the user's stored signature (JWT-protected).
+
+    Order of checks:
+      1. Signature exists in DB    (422 if missing)
+      2. PDF size / page count     (413 / 422)
+      3. Atomic usage check + inc  (429 if at limit)
+      4. Sign → return PDF
+    Document is processed in RAM only — never persisted.
+    """
+    uid = user["firebase_uid"]
+
+    # 1. Fetch user's PNG — 422 if not uploaded yet
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT png_bytes FROM signatures WHERE user_id=$1 AND png_bytes IS NOT NULL",
+            uid,
+        )
+    if row is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Подпись не загружена. Перейдите на вкладку «Подпись» и загрузите подпись.",
+        )
+    png_bytes = bytes(row["png_bytes"])
+
+    # 2. Read and validate PDF
+    pdf_bytes = await file.read()
+    _check_doc(pdf_bytes, file.filename or "document.pdf")
+
+    # 3. Parse anchors
+    try:
+        anchors = json.loads(anchors_json)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=422, detail="anchors_json: невалидный JSON")
+    if not anchors:
+        raise HTTPException(status_code=422, detail="Нет якорей для подписи")
+
+    # 4. Atomic usage check + increment (429 if at limit)
+    await _check_and_inc_usage(uid)
+
+    # 5. Build TextAnchor objects
+    from signfinder.anchors import TextAnchor
+    now_iso = datetime.now(timezone.utc).isoformat()
+    anchor_objects = []
+    for a in anchors:
+        try:
+            bbox = a.get("bbox", [0, 0, 100, 20])
+            anchor_objects.append(TextAnchor(
+                id=a.get("id", "a0"),
+                anchor_type=a.get("anchor_type", "text_proximity"),
+                anchor_level=a.get("anchor_level", 1),
+                anchor_text=a.get("anchor_text", ""),
+                position=a.get("position", "below"),
+                offset_pt=a.get("offset_pt", 0.0),
+                generated_pattern=a.get("generated_pattern", ""),
+                context_before=a.get("context_before", ""),
+                context_after=a.get("context_after", ""),
+                page_hint=str(a.get("page_hint", "0")),
+                added_by=a.get("added_by", "auto_regex"),
+                added_at=a.get("added_at", now_iso),
+                bbox=tuple(bbox),
+            ))
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"Невалидный якорь {a}: {e}")
+
+    # 6. Sign — user's real signature, no marker
+    try:
+        signed_bytes = sf.sign(
+            pdf_bytes,
+            anchor_objects,
+            png_bytes,
+            scale=signature_scale,
+            use_signature=True,
+            use_marker=False,
+            marker_color="pink",
+        )
+    except Exception as e:
+        logger.exception("me/sign failed for user %s", uid)
+        raise HTTPException(status_code=422, detail=str(e))
+
+    raw_name = f"signed_{file.filename or 'document.pdf'}"
+    ascii_name = raw_name.encode("ascii", "replace").decode("ascii")
+    utf8_name = quote(raw_name)
+    return Response(
+        content=signed_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{ascii_name}"; '
+                f"filename*=UTF-8''{utf8_name}"
+            )
+        },
+    )
