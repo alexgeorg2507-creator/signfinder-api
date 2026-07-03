@@ -22,7 +22,22 @@ jobs:
       - uses: google-github-actions/setup-gcloud@v2
 
       - name: Deploy to Cloud Run (test)
-        run: gcloud builds submit --config=cloudbuild-test.yaml --project=signfinder-cab-test
+        run: |
+          set -e
+          # --async + poll instead of streaming logs: the CI SA can create/read
+          # builds (cloudbuild.builds.editor) but Cloud Build's *default* logs
+          # bucket only streams to accounts with the primitive Viewer/Owner
+          # role — not worth granting just for log tailing.
+          BUILD_ID=$(gcloud builds submit --config=cloudbuild-test.yaml --project=signfinder-cab-test --async --format="value(id)")
+          echo "Build: https://console.cloud.google.com/cloud-build/builds/$BUILD_ID?project=signfinder-cab-test"
+          while true; do
+            STATUS=$(gcloud builds describe "$BUILD_ID" --project=signfinder-cab-test --format="value(status)")
+            case "$STATUS" in
+              SUCCESS) echo "Build succeeded"; break ;;
+              FAILURE|INTERNAL_ERROR|TIMEOUT|CANCELLED|EXPIRED) echo "Build failed: $STATUS"; exit 1 ;;
+              *) sleep 10 ;;
+            esac
+          done
 
       - name: Smoke test
         run: |
