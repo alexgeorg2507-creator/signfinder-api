@@ -214,7 +214,7 @@ async def put_profile(body: ProfileIn, user: UserDep) -> Any:
             uid,
             body.full_name,
             body.company,
-            json.dumps({"text": body.requisites}, ensure_ascii=False),
+            {"text": body.requisites},
         )
     return ProfileOut(
         full_name=body.full_name,

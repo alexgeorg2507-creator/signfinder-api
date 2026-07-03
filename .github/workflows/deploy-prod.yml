@@ -1,0 +1,63 @@
+name: Deploy Prod
+
+on:
+  workflow_dispatch:
+
+env:
+  CLOUD_SQL_PROXY_VERSION: "v2.14.2"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Alembic
+        run: pip install -e "."   # alembic + sqlalchemy[asyncio] are in [project].dependencies
+
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GOOGLE_CREDENTIALS_PROD }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Install Cloud SQL Auth Proxy
+        run: |
+          curl -sL -o /usr/local/bin/cloud-sql-proxy \
+            "https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/${CLOUD_SQL_PROXY_VERSION}/cloud-sql-proxy.linux.amd64"
+          chmod +x /usr/local/bin/cloud-sql-proxy
+
+      - name: alembic upgrade head (prod DB, via Cloud SQL Auth Proxy)
+        run: |
+          set -e
+          cloud-sql-proxy signfinder-prod:europe-west1:signfinder-db --port 5432 &
+          PROXY_PID=$!
+          sleep 5
+
+          PW=$(gcloud secrets versions access latest --secret=db-password --project=signfinder-prod)
+          echo "::add-mask::$PW"
+          PW_ENC=$(PW="$PW" python3 -c "import os, urllib.parse; print(urllib.parse.quote(os.environ['PW'], safe=''))")
+          echo "::add-mask::$PW_ENC"
+
+          export DATABASE_URL="postgresql+asyncpg://signfinder:${PW_ENC}@127.0.0.1:5432/signfinder"
+          alembic upgrade head
+
+          kill $PROXY_PID
+
+      - name: gcloud builds submit (prod)
+        run: gcloud builds submit --config=cloudbuild-prod.yaml --project=signfinder-prod
+
+      - name: Smoke test
+        run: |
+          set -e
+          curl -sf https://signfinder-api-cvuz6bbb7a-ew.a.run.app/health
+
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://signfinder-api-cvuz6bbb7a-ew.a.run.app/v1/me/profile)
+          if [ "$STATUS" != "401" ] && [ "$STATUS" != "403" ]; then
+            echo "Expected 401/403 on unauthenticated /v1/me/profile, got $STATUS"
+            exit 1
+          fi

@@ -51,6 +51,27 @@ curl -X POST http://localhost:8000/v1/analyze \
   -F "file=@contract.pdf" -F "language=ru"
 ```
 
+## Миграции
+
+Схема управляется Alembic (`alembic/versions/`), эквивалент старых `migrations/*.sql`.
+`DATABASE_URL` — async DSN, обычно через Cloud SQL Auth Proxy:
+
+```powershell
+cloud-sql-proxy --port=5432 <project>:europe-west1:signfinder-db
+$env:DATABASE_URL = "postgresql+asyncpg://signfinder:<пароль>@127.0.0.1:5432/signfinder"
+```
+
+```powershell
+# Применить на новой БД:
+alembic upgrade head
+
+# Fake-apply на уже существующей (test/prod уже на актуальной схеме):
+alembic stamp head
+
+# Откат на шаг:
+alembic downgrade -1
+```
+
 ## Деплой
 
 Деплой через Google Cloud Build:

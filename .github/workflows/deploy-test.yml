@@ -1,0 +1,36 @@
+name: Deploy Test
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  deploy:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GOOGLE_CREDENTIALS_TEST }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy to Cloud Run (test)
+        run: gcloud builds submit --config=cloudbuild-test.yaml --project=signfinder-cab-test
+
+      - name: Smoke test
+        run: |
+          set -e
+          curl -sf https://signfinder-api-svmlmbccma-ew.a.run.app/health
+
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://signfinder-api-svmlmbccma-ew.a.run.app/v1/me/profile)
+          if [ "$STATUS" != "401" ] && [ "$STATUS" != "403" ]; then
+            echo "Expected 401/403 on unauthenticated /v1/me/profile, got $STATUS"
+            exit 1
+          fi

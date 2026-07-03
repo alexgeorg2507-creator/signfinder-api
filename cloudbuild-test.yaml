@@ -26,7 +26,7 @@ steps:
       - '--allow-unauthenticated'
       - '--service-account=signfinder-api@signfinder-cab-test.iam.gserviceaccount.com'
       - '--add-cloudsql-instances=signfinder-cab-test:europe-west1:signfinder-db'
-      - '--set-secrets=DB_PASSWORD=db-password:latest'
+      - '--set-secrets=DB_PASSWORD=db-password:latest,DEEPSEEK_API_KEY=deepseek-api-key:latest,API_KEY=api-key:latest'
       - '--set-env-vars=STORAGE_MODE=gcs,GCS_BUCKET=signfinder-test-config,ENVIRONMENT=test,FIREBASE_PROJECT_ID=signfinder-cab-test,CLOUD_SQL_INSTANCE=signfinder-cab-test:europe-west1:signfinder-db,DB_USER=signfinder,DB_NAME=signfinder'
       - '--min-instances=0'
       - '--max-instances=3'

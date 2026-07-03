@@ -11,7 +11,10 @@ from fastapi import Depends, HTTPException, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 logger = logging.getLogger(__name__)
-_bearer = HTTPBearer()
+# auto_error=False: default HTTPBearer raises 403 on a missing header. We want a
+# uniform 401 for every "not authenticated" case (missing header, bad scheme,
+# invalid/expired token) — handled explicitly below.
+_bearer = HTTPBearer(auto_error=False)
 
 
 def init_firebase() -> None:
@@ -26,9 +29,15 @@ def init_firebase() -> None:
 
 
 async def _verify_token(
-    creds: Annotated[HTTPAuthorizationCredentials, Security(_bearer)],
+    creds: Annotated[HTTPAuthorizationCredentials | None, Security(_bearer)],
 ) -> dict:
     """Verify Firebase ID token. Returns decoded claims dict."""
+    if creds is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     try:
         return auth.verify_id_token(creds.credentials)
     except Exception as exc:

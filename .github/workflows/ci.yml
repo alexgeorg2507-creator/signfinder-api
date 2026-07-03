@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Deploy after tests pass (leave empty to just run tests)"
+        required: false
+        type: choice
+        options: ["", "test", "prod"]
+        default: ""
+
+env:
+  CLOUD_SQL_PROXY_VERSION: "v2.14.2"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -e ".[dev]"
+          pip install "signfinder-core[gcs] @ git+https://github.com/alexgeorg2507-creator/signfinder-core.git@main"
+
+      # tests/conftest.py needs ADC + `gcloud`/`cloud-sql-proxy` on PATH: it
+      # fetches db-password from Secret Manager and starts the proxy itself
+      # (same flow as local dev — see README "Миграции").
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GOOGLE_CREDENTIALS_TEST }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Install Cloud SQL Auth Proxy
+        run: |
+          curl -sL -o /usr/local/bin/cloud-sql-proxy \
+            "https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/${CLOUD_SQL_PROXY_VERSION}/cloud-sql-proxy.linux.amd64"
+          chmod +x /usr/local/bin/cloud-sql-proxy
+
+      - name: Run tests (against real signfinder-cab-test DB via Cloud SQL Auth Proxy)
+        run: pytest tests/
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results/results.xml
+
+  manual-deploy:
+    needs: test
+    if: github.event_name == 'workflow_dispatch' && inputs.environment != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ inputs.environment == 'prod' && secrets.GOOGLE_CREDENTIALS_PROD || secrets.GOOGLE_CREDENTIALS_TEST }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: gcloud builds submit
+        run: |
+          if [ "${{ inputs.environment }}" = "prod" ]; then
+            gcloud builds submit --config=cloudbuild-prod.yaml --project=signfinder-prod
+          else
+            gcloud builds submit --config=cloudbuild-test.yaml --project=signfinder-cab-test
+          fi
