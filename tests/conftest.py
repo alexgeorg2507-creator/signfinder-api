@@ -47,8 +47,12 @@ def _fetch_db_password() -> str:
             gcloud, "secrets", "versions", "access", "latest",
             "--secret=db-password", f"--project={TEST_PROJECT}",
         ],
-        capture_output=True, text=True, encoding="utf-8", check=True, env=env,
+        capture_output=True, text=True, encoding="utf-8", env=env,
     )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"gcloud secrets access failed (exit {result.returncode}): {result.stderr.strip()}"
+        )
     # gcloud on Windows prefixes stdout with a UTF-8 BOM that str.strip() does
     # not remove.
     return result.stdout.strip().lstrip("﻿")
