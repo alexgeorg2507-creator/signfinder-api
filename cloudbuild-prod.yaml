@@ -1,0 +1,39 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/signfinder-api:$BUILD_ID'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/signfinder-api:latest'
+      - '.'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - '--all-tags'
+      - 'gcr.io/$PROJECT_ID/signfinder-api'
+
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'signfinder-api'
+      - '--image=gcr.io/$PROJECT_ID/signfinder-api:$BUILD_ID'
+      - '--region=europe-west1'
+      - '--platform=managed'
+      - '--allow-unauthenticated'
+      - '--service-account=signfinder-api@signfinder-prod.iam.gserviceaccount.com'
+      - '--add-cloudsql-instances=signfinder-prod:europe-west1:signfinder-db'
+      - '--set-secrets=DB_PASSWORD=db-password:latest,DEEPSEEK_API_KEY=deepseek-key:latest,API_KEY=api-key:latest'
+      - '--set-env-vars=STORAGE_MODE=gcs,GCS_BUCKET=signfinder-prod-config,ENVIRONMENT=production,FIREBASE_PROJECT_ID=signfinder-prod,CLOUD_SQL_INSTANCE=signfinder-prod:europe-west1:signfinder-db,DB_USER=signfinder,DB_NAME=signfinder'
+      - '--min-instances=0'
+      - '--max-instances=10'
+      - '--memory=1Gi'
+      - '--cpu=1'
+      - '--timeout=120'
+
+images:
+  - 'gcr.io/$PROJECT_ID/signfinder-api:$BUILD_ID'
+  - 'gcr.io/$PROJECT_ID/signfinder-api:latest'
