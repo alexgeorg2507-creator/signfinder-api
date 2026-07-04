@@ -20,8 +20,6 @@ jobs:
         run: |
           API_VERSION=$(python3 -c "import tomllib; d=tomllib.load(open('pyproject.toml','rb')); print(d['project']['version'])")
           echo "API_VERSION=$API_VERSION" >> $GITHUB_ENV
-          echo "BUILD_SHA=${GITHUB_SHA::7}" >> $GITHUB_ENV
-          echo "BUILD_NUMBER=$GITHUB_RUN_NUMBER" >> $GITHUB_ENV
 
       - name: Install Alembic
         run: pip install -e "."
@@ -66,14 +64,6 @@ jobs:
             esac
           done
 
-      - name: Update Cloud Run env vars (build metadata)
-        run: |
-          gcloud run services update signfinder-api \
-            --project=signfinder-prod \
-            --region=europe-west1 \
-            --update-env-vars="BUILD_NUMBER=${BUILD_NUMBER},BUILD_SHA=${BUILD_SHA}" \
-            --quiet
-
       - name: Smoke test
         run: |
           set -e
@@ -84,30 +74,20 @@ jobs:
             exit 1
           fi
 
-      - name: Get live versions from prod
+      - name: Get live core version
         if: always()
         run: |
-          sleep 10
           VERSIONS=$(curl -sf https://signfinder-api-cvuz6bbb7a-ew.a.run.app/v1/version || echo '{}')
-          echo "Live versions: $VERSIONS"
-          LIVE_API_V=$(echo "$VERSIONS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('api_version','?'))" 2>/dev/null || echo "?")
-          LIVE_API_B=$(echo "$VERSIONS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('api_build','?'))" 2>/dev/null || echo "?")
-          LIVE_API_S=$(echo "$VERSIONS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('api_sha','?'))" 2>/dev/null || echo "?")
-          LIVE_CORE_V=$(echo "$VERSIONS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('signfinder_core_version','?'))" 2>/dev/null || echo "?")
-          echo "LIVE_API_V=$LIVE_API_V" >> $GITHUB_ENV
-          echo "LIVE_API_B=$LIVE_API_B" >> $GITHUB_ENV
-          echo "LIVE_API_S=$LIVE_API_S" >> $GITHUB_ENV
-          echo "LIVE_CORE_V=$LIVE_CORE_V" >> $GITHUB_ENV
+          echo "Live: $VERSIONS"
+          CORE_V=$(echo "$VERSIONS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('signfinder_core_version','?'))" 2>/dev/null || echo "?")
+          echo "LIVE_CORE_V=$CORE_V" >> $GITHUB_ENV
 
-      # Telegram notification fires ALWAYS — before optional Firebase step
-      - name: Notify Telegram — prod deployed
+      - name: Notify Telegram — prod API deployed
         if: always()
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          LIVE_API_V: ${{ env.LIVE_API_V }}
-          LIVE_API_B: ${{ env.LIVE_API_B }}
-          LIVE_API_S: ${{ env.LIVE_API_S }}
+          API_VERSION: ${{ env.API_VERSION }}
           LIVE_CORE_V: ${{ env.LIVE_CORE_V }}
           JOB_STATUS: ${{ job.status }}
           GH_RUN: ${{ github.run_number }}
@@ -116,42 +96,27 @@ jobs:
           pip install requests -q
           python3 - <<'PYEOF'
           import os, requests
-
           bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
           chat_id   = os.environ.get("TELEGRAM_CHAT_ID", "")
           if not bot_token or not chat_id:
-              print("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set — skipping")
+              print("Telegram secrets not set — skipping")
               exit(0)
-
-          status   = os.environ.get("JOB_STATUS", "unknown")
-          api_v    = os.environ.get("LIVE_API_V", os.environ.get("API_VERSION", "?"))
-          api_b    = os.environ.get("LIVE_API_B", os.environ.get("BUILD_NUMBER", "?"))
-          api_s    = os.environ.get("LIVE_API_S", os.environ.get("BUILD_SHA", "?"))
-          core_v   = os.environ.get("LIVE_CORE_V", "?")
-          run_n    = os.environ.get("GH_RUN", "?")
-          actor    = os.environ.get("GH_ACTOR", "?")
-
+          status  = os.environ.get("JOB_STATUS", "unknown")
+          api_v   = os.environ.get("API_VERSION", "?")
+          core_v  = os.environ.get("LIVE_CORE_V", "?")
+          run_n   = os.environ.get("GH_RUN", "?")
+          actor   = os.environ.get("GH_ACTOR", "?")
           icon = "\u2705" if status == "success" else "\U0001f6a8"
           text = (
-              f"{icon} SignFinder PROD deployed\n"
-              f"API: {api_v} (build #{api_b}, {api_s})\n"
-              f"Core: {core_v}\n"
-              f"Status: {status}\n"
-              f"Run: #{run_n} by {actor}"
+              f"{icon} SignFinder PROD — API deployed\n"
+              f"API:  v{api_v}\n"
+              f"Core: v{core_v}\n"
+              f"Status: {status} | run #{run_n} by {actor}"
           )
-
           resp = requests.post(
               f"https://api.telegram.org/bot{bot_token}/sendMessage",
               json={"chat_id": chat_id, "text": text},
               timeout=10,
           )
-          print(f"Telegram response: {resp.status_code} {resp.text}")
+          print(f"Telegram: {resp.status_code}")
           PYEOF
-
-      # Firebase Hosting deploy is optional — failure does NOT block the job.
-      # TODO: move to a dedicated workflow in SignfinderWeb repo.
-      - name: Deploy Firebase Hosting (prod) [optional]
-        continue-on-error: true
-        run: |
-          npm install -g firebase-tools --silent
-          firebase deploy --only hosting --project=signfinder-prod
