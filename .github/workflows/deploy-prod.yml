@@ -85,6 +85,7 @@ jobs:
           fi
 
       - name: Get live versions from prod
+        if: always()
         run: |
           sleep 10
           VERSIONS=$(curl -sf https://signfinder-api-cvuz6bbb7a-ew.a.run.app/v1/version || echo '{}')
