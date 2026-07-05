@@ -14,7 +14,7 @@ def test_get_usage_new_user(client_as):
     c = client_as(USER_A)
     r = c.get("/v1/me/usage")
     assert r.status_code == 200
-    assert r.json() == {"doc_count": 0, "limit": 10, "period": _current_period()}
+    assert r.json() == {"doc_count": 0, "limit": 100, "period": _current_period()}
 
 
 def test_analyze_429_when_at_limit(client_as, db_exec):
@@ -25,8 +25,8 @@ def test_analyze_429_when_at_limit(client_as, db_exec):
 
     db_exec(
         lambda conn: conn.execute(
-            "INSERT INTO usage_counters (user_id, period, doc_count) VALUES ($1, $2, 10) "
-            "ON CONFLICT (user_id, period) DO UPDATE SET doc_count = 10",
+            "INSERT INTO usage_counters (user_id, period, doc_count) VALUES ($1, $2, 100) "
+            "ON CONFLICT (user_id, period) DO UPDATE SET doc_count = 100",
             USER_A, period,
         )
     )
@@ -41,4 +41,4 @@ def test_analyze_429_when_at_limit(client_as, db_exec):
             USER_A, period,
         )
     )
-    assert count == 10
+    assert count == 100
