@@ -12,11 +12,12 @@ import json
 import logging
 from urllib.parse import quote
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 
 from app.dependencies import ApiKeyDep, SignFinderDep
 from app.models.analysis import AnalysisResponse, BatchAnalysisResponse, BatchItemResponse
+from app import sandbox as _sb
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -40,7 +41,8 @@ def _check_doc_size(pdf_bytes: bytes, filename: str) -> None:
 
 @router.post("/analyze")
 async def analyze_document(
-    _: ApiKeyDep,
+    request: Request,
+    api_key: ApiKeyDep,
     sf: SignFinderDep,
     file: UploadFile = File(..., description="PDF файл договора"),
     language: str | None = Form(None, description="Язык: ru, en, pl. None = автодетект"),
@@ -48,6 +50,9 @@ async def analyze_document(
     async_mode: bool = Form(False, alias="async", description="true = async, вернёт job_id"),
 ):
     """Полный анализ документа: матчинг шаблонов + поиск мест подписи."""
+    if api_key == _sb.SANDBOX_API_KEY:
+        _sb.check_rate_limit(_sb.get_client_ip(request))
+
     if async_mode:
         from app.job_storage import create_job, save_job_input_pdf
         from app.tasks import enqueue_job
@@ -65,6 +70,9 @@ async def analyze_document(
 
     pdf_bytes = await file.read()
     _check_doc_size(pdf_bytes, file.filename or "document.pdf")
+    if api_key == _sb.SANDBOX_API_KEY:
+        _sb.check_size(pdf_bytes)
+        _sb.check_page_count(pdf_bytes)
     try:
         result = sf.analyze(
             pdf_bytes,
@@ -124,7 +132,8 @@ async def analyze_batch(
 
 @router.post("/sign")
 async def sign_document(
-    _: ApiKeyDep,
+    request: Request,
+    api_key: ApiKeyDep,
     sf: SignFinderDep,
     file: UploadFile = File(..., description="PDF файл для подписания"),
     anchors_json: str = Form(..., description="JSON список якорей [{id, bbox, page_hint, ...}]"),
@@ -132,8 +141,13 @@ async def sign_document(
     signature_scale: float = Form(1.0, description="Масштаб подписи (1.0 = 42pt = 15мм высота)"),
 ):
     """Наложить подпись/маркер по якорям. Режим задаётся через /settings/sign-mode."""
+    if api_key == _sb.SANDBOX_API_KEY:
+        _sb.check_rate_limit(_sb.get_client_ip(request))
+
     pdf_bytes = await file.read()
     _check_doc_size(pdf_bytes, file.filename or "document.pdf")
+    if api_key == _sb.SANDBOX_API_KEY:
+        _sb.check_size(pdf_bytes)
 
     try:
         anchors = json.loads(anchors_json)

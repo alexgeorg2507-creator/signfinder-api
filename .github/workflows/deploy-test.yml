@@ -15,6 +15,13 @@ jobs:
         with:
           ref: main
 
+      - name: Extract versions
+        run: |
+          API_VERSION=$(python3 -c "import tomllib; d=tomllib.load(open('pyproject.toml','rb')); print(d['project']['version'])")
+          echo "API_VERSION=$API_VERSION" >> $GITHUB_ENV
+          echo "BUILD_SHA=${GITHUB_SHA::7}" >> $GITHUB_ENV
+          echo "BUILD_NUMBER=$GITHUB_RUN_NUMBER" >> $GITHUB_ENV
+
       - uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GOOGLE_CREDENTIALS_TEST }}
@@ -39,6 +46,14 @@ jobs:
             esac
           done
 
+      - name: Update Cloud Run env vars (build metadata)
+        run: |
+          gcloud run services update signfinder-api \
+            --project=signfinder-cab-test \
+            --region=europe-west1 \
+            --update-env-vars="BUILD_NUMBER=${BUILD_NUMBER},BUILD_SHA=${BUILD_SHA}" \
+            --quiet
+
       - name: Smoke test
         run: |
           set -e
@@ -49,3 +64,10 @@ jobs:
             echo "Expected 401/403 on unauthenticated /v1/me/profile, got $STATUS"
             exit 1
           fi
+
+      - name: Log deployed versions
+        run: |
+          sleep 10
+          VERSIONS=$(curl -sf https://signfinder-api-svmlmbccma-ew.a.run.app/v1/version || echo '{}')
+          echo "Deployed to test:"
+          echo "$VERSIONS"

@@ -1,8 +1,10 @@
-"""SignFinder FastAPI application — v1.18.4."""
+"""SignFinder FastAPI application."""
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,6 +16,15 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 _API_PREFIX = "/api"
+
+# Dockerfile copies only app/ (no `pip install .` of this distribution), so
+# package metadata isn't registered in the production image — fall back to a
+# literal kept in sync with pyproject.toml's [project].version.
+_FALLBACK_API_VERSION = "1.18.4"
+try:
+    _API_VERSION = _pkg_version("signfinder-api")
+except PackageNotFoundError:
+    _API_VERSION = _FALLBACK_API_VERSION
 
 
 def _init_llm_config() -> None:
@@ -67,7 +78,12 @@ def _seed_sandbox_storage(sf) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("SignFinder API starting up...")
+    build_number = os.environ.get("BUILD_NUMBER", "")
+    build_sha = os.environ.get("BUILD_SHA", "")
+    logger.info(
+        "SignFinder API v%s (build #%s, sha: %s) starting up...",
+        _API_VERSION, build_number or "?", build_sha or "?",
+    )
     _init_llm_config()  # must run before get_signfinder() reads llm_config.json
 
     from app.auth import init_firebase
@@ -101,7 +117,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="SignFinder API",
     description="REST API for automatic signature placement in contracts",
-    version="1.18.3",
+    version=_API_VERSION,
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",

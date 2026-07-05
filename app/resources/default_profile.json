@@ -1,0 +1,16 @@
+{
+  "id": "default",
+  "display": "Innowise / Borisov",
+  "match_markers": ["Innowise", "Borisov", "Инлайн технолоджис", "Лебедев"],
+  "company_aliases": [
+    {"language": "en", "value": "Innowise Sp. z o.o, Innowise Group, Innowise"},
+    {"language": "pl", "value": "Innowise Sp. z o.o, Innowise Group, Innowise"},
+    {"language": "ru", "value": "Общество с ограниченной ответственностью «Инлайн технолоджис», Инлайн технолоджис, ООО «Инлайн технолоджис»"}
+  ],
+  "signer_aliases": [
+    {"language": "en", "value": "Vadim Borisov, Borisov"},
+    {"language": "pl", "value": "Vadim Borisov, Borisov"},
+    {"language": "ru", "value": "Лебедев, Лебедев А, Лебедев Алексей Петрович, Лебедев А.П., А.П. Лебедев"}
+  ],
+  "updated_at": "2026-06-27T00:00:00+00:00"
+}

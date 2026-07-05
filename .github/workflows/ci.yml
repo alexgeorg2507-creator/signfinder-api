@@ -27,6 +27,15 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Extract versions
+        run: |
+          API_VERSION=$(python3 -c "import tomllib; d=tomllib.load(open('pyproject.toml','rb')); print(d['project']['version'])")
+          CORE_VERSION=$(pip show signfinder-core 2>/dev/null | grep Version | awk '{print $2}' || echo "unknown")
+          echo "API_VERSION=$API_VERSION" >> $GITHUB_ENV
+          echo "CORE_VERSION=$CORE_VERSION" >> $GITHUB_ENV
+          echo "BUILD_SHA=${GITHUB_SHA::7}" >> $GITHUB_ENV
+          echo "BUILD_NUMBER=$GITHUB_RUN_NUMBER" >> $GITHUB_ENV
+
       - name: Install dependencies
         run: |
           pip install -e ".[dev]"
@@ -49,6 +58,11 @@ jobs:
 
       - name: Run tests (against real signfinder-cab-test DB via Cloud SQL Auth Proxy)
         run: pytest tests/
+
+      - name: Log versions
+        run: |
+          echo "API: ${{ env.API_VERSION }} build #${{ env.BUILD_NUMBER }} (${{ env.BUILD_SHA }})"
+          echo "Core: ${{ env.CORE_VERSION }}"
 
       - name: Upload test results
         if: always()

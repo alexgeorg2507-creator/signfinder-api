@@ -11,14 +11,19 @@ router = APIRouter()
 
 @router.get("/healthz", tags=["System"])
 @router.get("/health", tags=["System"])
-async def liveness():
+async def liveness(request: Request):
     """Cloud Run liveness probe + Streamlit health check."""
     try:
         import signfinder
         core_version = signfinder.__version__
     except Exception:
         core_version = "unknown"
-    return {"status": "ok", "core_version": core_version}
+    return {
+        "status": "ok",
+        "api_version": request.app.version,
+        "api_build": os.environ.get("BUILD_NUMBER", ""),
+        "core_version": core_version,
+    }
 
 
 @router.get("/readyz", tags=["System"])
@@ -46,6 +51,8 @@ async def version(request: Request):
 
     return {
         "api_version": request.app.version,
+        "api_build": os.environ.get("BUILD_NUMBER", ""),
+        "api_sha": os.environ.get("BUILD_SHA", ""),
         "signfinder_core_version": core_version,
         "environment": os.environ.get("ENVIRONMENT", "development"),
     }
