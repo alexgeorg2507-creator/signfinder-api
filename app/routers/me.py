@@ -32,8 +32,15 @@ router = APIRouter(tags=["Cabinet"])
 _MAX_SIG_UPLOAD = 5 * 1024 * 1024   # 5 MB raw upload
 _MAX_SIG_PNG    = 500 * 1024         # 500 KB processed PNG
 _MAX_DOC_SIZE   = 5 * 1024 * 1024   # 5 MB cabinet doc limit
-_MAX_DOC_PAGES  = 3
+_MAX_DOC_PAGES  = 10  # было 3
 _MONTHLY_LIMIT  = 10
+
+_ALLOWED_DOC_EXTENSIONS = {"pdf", "doc", "docx"}
+_ALLOWED_DOC_MIME = {
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/msword",
+}
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -114,8 +121,15 @@ async def _check_and_inc_usage(uid: str) -> int:
     return new_count or 1
 
 
-def _check_doc(pdf_bytes: bytes, filename: str) -> None:
-    """Validate size and page count. Raises 413/422."""
+def _check_doc(pdf_bytes: bytes, filename: str, content_type: str | None = None) -> None:
+    """Validate MIME, size, and page count. Raises 413/422."""
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    ct = (content_type or "").lower().split(";")[0].strip()
+    if ext not in _ALLOWED_DOC_EXTENSIONS and ct not in _ALLOWED_DOC_MIME:
+        raise HTTPException(
+            status_code=422,
+            detail="Неподдерживаемый формат файла. Разрешены: PDF, DOC, DOCX.",
+        )
     if len(pdf_bytes) > _MAX_DOC_SIZE:
         mb = len(pdf_bytes) / (1024 * 1024)
         raise HTTPException(
@@ -134,8 +148,33 @@ def _check_doc(pdf_bytes: bytes, filename: str) -> None:
     if n > _MAX_DOC_PAGES:
         raise HTTPException(
             status_code=422,
-            detail=f"Слишком много страниц ({n}). Лимит кабинета: {_MAX_DOC_PAGES} страницы.",
+            detail=f"Слишком много страниц ({n}). Лимит кабинета: {_MAX_DOC_PAGES} страниц.",
         )
+
+
+def _convert_to_pdf_if_needed(raw: bytes, filename: str, content_type: str | None) -> bytes:
+    """Convert DOC/DOCX uploads to PDF via mammoth (→ HTML) + weasyprint (→ PDF).
+
+    Returns raw bytes unchanged for PDF input.
+    """
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    ct = (content_type or "").lower().split(";")[0].strip()
+    is_docx = ext in ("doc", "docx") or ct in (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/msword",
+    )
+    if not is_docx:
+        return raw
+    try:
+        import io
+        import mammoth
+        import weasyprint
+        html = mammoth.convert_to_html(io.BytesIO(raw)).value
+        return weasyprint.HTML(string=html).write_pdf()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Не удалось конвертировать документ: {e}")
 
 
 # ── models ────────────────────────────────────────────────────────────────────
@@ -361,8 +400,10 @@ async def me_analyze(
             detail=f"Лимит исчерпан: {_MONTHLY_LIMIT} документов в месяц на бесплатном тарифе.",
         )
 
-    pdf_bytes = await file.read()
-    _check_doc(pdf_bytes, file.filename or "document.pdf")
+    raw_bytes = await file.read()
+    filename = file.filename or "document.pdf"
+    pdf_bytes = _convert_to_pdf_if_needed(raw_bytes, filename, file.content_type)
+    _check_doc(pdf_bytes, filename, file.content_type)
 
     try:
         result = sf.analyze(
@@ -417,9 +458,11 @@ async def me_sign(
         )
     png_bytes = bytes(row["png_bytes"])
 
-    # 2. Read and validate PDF
-    pdf_bytes = await file.read()
-    _check_doc(pdf_bytes, file.filename or "document.pdf")
+    # 2. Read, convert (DOC/DOCX → PDF), and validate PDF
+    raw_bytes = await file.read()
+    filename = file.filename or "document.pdf"
+    pdf_bytes = _convert_to_pdf_if_needed(raw_bytes, filename, file.content_type)
+    _check_doc(pdf_bytes, filename, file.content_type)
 
     # 3. Parse anchors
     try:
@@ -472,7 +515,8 @@ async def me_sign(
         logger.exception("me/sign failed for user %s", uid)
         raise HTTPException(status_code=422, detail=str(e))
 
-    raw_name = f"signed_{file.filename or 'document.pdf'}"
+    base_name = filename.rsplit(".", 1)[0] if "." in filename else filename
+    raw_name = f"signed_{base_name}.pdf"
     ascii_name = raw_name.encode("ascii", "replace").decode("ascii")
     utf8_name = quote(raw_name)
     return Response(

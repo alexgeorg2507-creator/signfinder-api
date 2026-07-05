@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "signfinder-api"
-version = "1.9.0"
+version = "1.18.4"
 description = "FastAPI REST API for SignFinder core engine"
 requires-python = ">=3.10"
 
@@ -19,6 +19,9 @@ dependencies = [
     "asyncpg>=0.29",
     "alembic>=1.13",
     "sqlalchemy[asyncio]>=2.0",
+    # DOC/DOCX → PDF conversion (Fix-1.2):
+    "mammoth>=1.6",
+    "weasyprint>=62",
     # signfinder-core:
     # DEV:        pip install -e ../signfinder-core/
     # PRODUCTION: see Dockerfile — installs from GitHub
