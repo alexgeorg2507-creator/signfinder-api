@@ -33,7 +33,7 @@ _MAX_SIG_UPLOAD = 5 * 1024 * 1024   # 5 MB raw upload
 _MAX_SIG_PNG    = 500 * 1024         # 500 KB processed PNG
 _MAX_DOC_SIZE   = 5 * 1024 * 1024   # 5 MB cabinet doc limit
 _MAX_DOC_PAGES  = 10  # было 3
-_MONTHLY_LIMIT  = 10
+_MONTHLY_LIMIT  = 100
 
 _ALLOWED_DOC_EXTENSIONS = {"pdf", "doc", "docx"}
 _ALLOWED_DOC_MIME = {
