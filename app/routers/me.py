@@ -153,8 +153,33 @@ def _check_doc(pdf_bytes: bytes, filename: str, content_type: str | None = None)
         )
 
 
+_DOCX_PDF_CSS = """
+    @page { size: A4; margin: 2.2cm 2cm; }
+    body {
+      font-family: "Liberation Sans", Arial, sans-serif;
+      font-size: 11pt;
+      line-height: 1.5;
+      color: #1a1a18;
+      background: #fff;
+    }
+    p { margin: 0 0 0.6em; }
+    h1, h2, h3, h4, h5, h6 { margin: 0.8em 0 0.5em; line-height: 1.3; }
+    table { border-collapse: collapse; width: 100%; margin-bottom: 0.8em; }
+    td, th { border: 1px solid #ccc; padding: 4px 8px; }
+    ol, ul { margin: 0 0 0.6em; padding-left: 1.4em; }
+    img { max-width: 100%; }
+"""
+
+
 def _convert_to_pdf_if_needed(raw: bytes, filename: str, content_type: str | None) -> bytes:
     """Convert DOC/DOCX uploads to PDF via mammoth (→ HTML) + weasyprint (→ PDF).
+
+    mammoth only maps Word styles to semantic HTML — it carries no visual
+    styling of its own, so the HTML must be given its own CSS or weasyprint
+    falls back to its bare UA defaults (serif font, no page margins, no
+    paragraph spacing), which looks nothing like the mammoth.js preview shown
+    client-side before signing. _DOCX_PDF_CSS mirrors that client preview's
+    styling (see showDocxPreview() in app/index.html) so both renders agree.
 
     Returns raw bytes unchanged for PDF input.
     """
@@ -170,7 +195,8 @@ def _convert_to_pdf_if_needed(raw: bytes, filename: str, content_type: str | Non
         import io
         import mammoth
         import weasyprint
-        html = mammoth.convert_to_html(io.BytesIO(raw)).value
+        body_html = mammoth.convert_to_html(io.BytesIO(raw)).value
+        html = f"<!DOCTYPE html><html><head><meta charset='UTF-8'><style>{_DOCX_PDF_CSS}</style></head><body>{body_html}</body></html>"
         return weasyprint.HTML(string=html).write_pdf()
     except HTTPException:
         raise
