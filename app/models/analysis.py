@@ -73,6 +73,12 @@ class AnalysisResponse(BaseModel):
     detected_signer_id: Optional[str] = None
     review: Optional[ReviewResponse] = None
 
+    # Fix-7 (Phase A): cabinet template remember/forget (tenant-scoped, /v1/me/*)
+    from_template: bool = False
+    template_id: Optional[str] = None
+    template_name: Optional[str] = None
+    synonyms_used: Optional[dict[str, Any]] = None
+
     @staticmethod
     def _review_from_dict(rev: Optional[dict]) -> Optional["ReviewResponse"]:
         if not rev:

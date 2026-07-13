@@ -25,6 +25,7 @@ from app.auth import FirebaseToken
 from app.db import get_pool
 from app.dependencies import SignFinderDep
 from app.models.analysis import AnalysisResponse
+from app.tenant_storage import TenantScopedStorage
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Cabinet"])
@@ -177,6 +178,68 @@ def _convert_to_pdf_if_needed(raw: bytes, filename: str, content_type: str | Non
         raise HTTPException(status_code=422, detail=f"Не удалось конвертировать документ: {e}")
 
 
+# ── Fix-7: tenant-scoped template matching (Phase A) ───────────────────────────
+
+def _tenant_template_match(tenant_storage: TenantScopedStorage, pdf_bytes: bytes, filename: str):
+    """Try matching the doc against this tenant's own remembered templates.
+
+    Mirrors the template-path branch of SignFinder.analyze() (signfinder-core),
+    but against tenant_storage instead of the global storage, so a green match
+    only comes from templates this tenant remembered via /me/templates/remember.
+
+    Returns (doc, lang_fast, fingerprint, tpl, tpl_matches, tpl_anchors).
+    tpl is None when there's no usable green match — doc/lang_fast/fingerprint
+    are still returned so the caller can reuse them on the LLM fallback path.
+    """
+    import fitz
+
+    from signfinder.fingerprint import compute_fingerprint
+    from signfinder.pdf import detect_language_fast, parse_pdf_bytes
+    from signfinder.pipeline import apply_template_to_doc
+    from signfinder.templates import find_matching_templates, load_template, update_usage_stats
+
+    doc = parse_pdf_bytes(pdf_bytes, filename=filename)
+    lang_fast = detect_language_fast(doc) or "ru"
+
+    fitz_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        fingerprint = compute_fingerprint(fitz_doc, lang_fast)
+        matcher = find_matching_templates(
+            fitz_doc, lang_fast, storage=tenant_storage, fingerprint=fingerprint,
+        )
+    finally:
+        fitz_doc.close()
+
+    if matcher.traffic_light == "green" and matcher.best_match:
+        tpl = load_template(tenant_storage, matcher.best_match.template_id)
+        if tpl is not None:
+            tpl_matches, tpl_anchors = apply_template_to_doc(doc, tpl, lang_fast)
+            if tpl_anchors:
+                try:
+                    update_usage_stats(tenant_storage, matcher.best_match.template_id, "applied")
+                except Exception:
+                    logger.warning("update_usage_stats failed for %s", matcher.best_match.template_id)
+                return doc, lang_fast, fingerprint, tpl, tpl_matches, tpl_anchors
+
+    return doc, lang_fast, fingerprint, None, None, None
+
+
+def _build_synonyms_used(doc, language: str, our_side: dict) -> dict:
+    """Same synonyms_used shape as save_pipeline_template() (signfinder-core),
+    so a template saved via /me/templates/remember matches/names consistently
+    with templates saved by the internal pipeline.
+    """
+    from signfinder.pipeline.auto1 import _extract_contract_type, _extract_counterparty
+
+    return {
+        "legal_entity": our_side.get("legal_entity", ""),
+        "roles": our_side.get("roles", []),
+        "signer": our_side.get("signer", ""),
+        "contract_type": _extract_contract_type(doc, language),
+        "counterparty": _extract_counterparty(our_side),
+    }
+
+
 # ── models ────────────────────────────────────────────────────────────────────
 
 class ProfileIn(BaseModel):
@@ -212,6 +275,19 @@ class UsageOut(BaseModel):
     doc_count: int
     limit: int
     period: str
+
+
+class RememberTemplateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    fingerprint: dict
+    anchors: list
+    language: str
+    synonyms_used: dict = {}
+
+
+class RememberTemplateOut(BaseModel):
+    template_id: str
+    name: str
 
 
 # ── profile ───────────────────────────────────────────────────────────────────
@@ -405,6 +481,34 @@ async def me_analyze(
     pdf_bytes = _convert_to_pdf_if_needed(raw_bytes, filename, file.content_type)
     _check_doc(pdf_bytes, filename, file.content_type)
 
+    tenant_storage = TenantScopedStorage(sf.storage, uid)
+
+    # Fix-7 Phase A: try this tenant's own remembered templates before the LLM.
+    # Failure here must never break analysis — fall through to the LLM path.
+    doc = lang_fast = fingerprint = tpl = tpl_matches = tpl_anchors = None
+    try:
+        doc, lang_fast, fingerprint, tpl, tpl_matches, tpl_anchors = _tenant_template_match(
+            tenant_storage, pdf_bytes, filename,
+        )
+    except Exception as e:
+        logger.warning("me/analyze tenant template match failed for user %s: %s", uid, e)
+
+    if tpl is not None:
+        from signfinder import AnalysisResult
+
+        result = AnalysisResult(
+            traffic_light="green",
+            anchors=tpl_anchors,
+            matches=tpl_matches,
+            fingerprint=fingerprint,
+        )
+        resp = AnalysisResponse.from_result(result)
+        resp.from_template = True
+        resp.template_id = tpl.template_id
+        resp.template_name = tpl.name
+        resp.synonyms_used = tpl.synonyms_used
+        return resp
+
     try:
         result = sf.analyze(
             pdf_bytes,
@@ -421,8 +525,66 @@ async def me_analyze(
             our_side=None,
             error=str(e),
             pipeline_debug={},
+            from_template=False,
         )
-    return AnalysisResponse.from_result(result)
+
+    resp = AnalysisResponse.from_result(result)
+    resp.from_template = False
+    if resp.fingerprint is None:
+        resp.fingerprint = fingerprint
+    if doc is not None and lang_fast and result.our_side:
+        try:
+            resp.synonyms_used = _build_synonyms_used(doc, lang_fast, result.our_side)
+        except Exception as e:
+            logger.warning("me/analyze synonyms_used build failed for user %s: %s", uid, e)
+            resp.synonyms_used = {}
+    else:
+        resp.synonyms_used = {}
+    return resp
+
+
+# ── Fix-7 Phase A.3: remember / forget templates (tenant-scoped) ───────────────
+
+@router.post("/me/templates/remember", response_model=RememberTemplateOut)
+async def remember_template(body: RememberTemplateIn, user: UserDep, sf: SignFinderDep) -> Any:
+    """Save the last-analyzed document as a reusable template for this tenant.
+
+    Takes fingerprint/anchors/synonyms_used straight from a prior /me/analyze
+    response — the file is never re-uploaded or re-parsed.
+    """
+    from signfinder.templates import new_template, save_template
+
+    uid = user["firebase_uid"]
+    tenant_storage = TenantScopedStorage(sf.storage, uid)
+
+    tpl = new_template(
+        language=body.language,
+        anchors=body.anchors,
+        fingerprint=body.fingerprint,
+        synonyms_used=body.synonyms_used,
+        created_by="cabinet_remember",
+    )
+    try:
+        save_template(tenant_storage, tpl)
+    except Exception as e:
+        logger.exception("remember_template failed for user %s", uid)
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return RememberTemplateOut(template_id=tpl.template_id, name=tpl.name)
+
+
+@router.delete("/me/templates/{template_id}", status_code=204)
+async def forget_template(template_id: str, user: UserDep, sf: SignFinderDep) -> None:
+    """Forget a remembered template. 404 if not found (including other users' —
+    tenant scoping makes those physically absent from this tenant's prefix)."""
+    from signfinder.templates import delete_template
+
+    uid = user["firebase_uid"]
+    tenant_storage = TenantScopedStorage(sf.storage, uid)
+
+    deleted = delete_template(tenant_storage, template_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Шаблон '{template_id}' не найден")
 
 
 @router.post("/me/sign")
@@ -432,6 +594,8 @@ async def me_sign(
     file: UploadFile = File(...),
     anchors_json: str = Form(...),
     signature_scale: float = Form(1.0),
+    manual_anchors_json: str = Form("[]"),
+    exclude_pages_json: str = Form("[]"),
 ) -> Response:
     """Sign a contract using the user's stored signature (JWT-protected).
 
@@ -441,6 +605,11 @@ async def me_sign(
       3. Atomic usage check + inc  (429 if at limit)
       4. Sign → return PDF
     Document is processed in RAM only — never persisted.
+
+    Fix-7 Phase B: manual_anchors_json — freeform placements from the cabinet's
+    drag/resize UI: [{page, x, y, width, height}], page 1-indexed, x/y/width/
+    height in PDF points. exclude_pages_json — 1-indexed pages to drop existing
+    (LLM/template) anchors from; manual placements are never auto-excluded.
     """
     uid = user["firebase_uid"]
 
@@ -464,12 +633,17 @@ async def me_sign(
     pdf_bytes = _convert_to_pdf_if_needed(raw_bytes, filename, file.content_type)
     _check_doc(pdf_bytes, filename, file.content_type)
 
-    # 3. Parse anchors
+    # 3. Parse anchors + Fix-7 manual placements / page exclusions
     try:
         anchors = json.loads(anchors_json)
+        manual_anchors = json.loads(manual_anchors_json)
+        exclude_pages = set(json.loads(exclude_pages_json))
     except json.JSONDecodeError:
-        raise HTTPException(status_code=422, detail="anchors_json: невалидный JSON")
-    if not anchors:
+        raise HTTPException(
+            status_code=422,
+            detail="anchors_json/manual_anchors_json/exclude_pages_json: невалидный JSON",
+        )
+    if not anchors and not manual_anchors:
         raise HTTPException(status_code=422, detail="Нет якорей для подписи")
 
     # 4. Atomic usage check + increment (429 if at limit)
@@ -500,11 +674,57 @@ async def me_sign(
         except Exception as e:
             raise HTTPException(status_code=422, detail=f"Невалидный якорь {a}: {e}")
 
+    # Fix-7: drop anchors on excluded pages ("удалить подпись на текущей странице").
+    # Resolves page_hint ("first"/"last"/int) via the same _to_match SignFinder
+    # already uses internally, so exclusion matches exactly what would be signed.
+    if exclude_pages and anchor_objects:
+        try:
+            import fitz
+            with fitz.open(stream=pdf_bytes, filetype="pdf") as _doc:
+                total_pages = len(_doc)
+        except Exception:
+            total_pages = 0
+
+        def _page_1idx(a) -> int:
+            p = sf._to_match(a).page
+            if p < 0:
+                p = total_pages + p  # "last" resolves to -1 → wrap to real index
+            return p + 1
+
+        anchor_objects = [a for a in anchor_objects if _page_1idx(a) not in exclude_pages]
+
+    # Fix-7 Phase B: freeform manual placements (drag/resize UI). added_by=
+    # "manual_exact" makes apply_signature() (signfinder-core) place the PNG
+    # literally at this bbox instead of searching the page for a nearby anchor.
+    from signfinder.anchors import SignMatch
+    manual_matches = []
+    for i, m in enumerate(manual_anchors):
+        try:
+            page = int(m["page"])
+            x, y = float(m["x"]), float(m["y"])
+            w, h = float(m["width"]), float(m["height"])
+        except (KeyError, TypeError, ValueError) as e:
+            raise HTTPException(status_code=422, detail=f"Невалидный manual_anchor {m}: {e}")
+        manual_matches.append(SignMatch(
+            id=f"manual_{i}",
+            page=page - 1,
+            bbox=(x, y, x + w, y + h),
+            context="",
+            party="manual",
+            pattern="",
+            confidence=1.0,
+            added_by="manual_exact",
+        ))
+
+    all_matches = anchor_objects + manual_matches
+    if not all_matches:
+        raise HTTPException(status_code=422, detail="Нет якорей для подписи")
+
     # 6. Sign — user's real signature, no marker
     try:
         signed_bytes = sf.sign(
             pdf_bytes,
-            anchor_objects,
+            all_matches,
             png_bytes,
             scale=signature_scale,
             use_signature=True,
