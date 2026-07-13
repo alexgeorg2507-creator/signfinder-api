@@ -153,36 +153,21 @@ def _check_doc(pdf_bytes: bytes, filename: str, content_type: str | None = None)
         )
 
 
-_DOCX_PDF_CSS = """
-    @page { size: A4; margin: 2.2cm 2cm; }
-    body {
-      font-family: "Liberation Sans", Arial, sans-serif;
-      font-size: 11pt;
-      line-height: 1.5;
-      color: #1a1a18;
-      background: #fff;
-    }
-    p { margin: 0 0 0.6em; }
-    h1, h2, h3, h4, h5, h6 { margin: 0.8em 0 0.5em; line-height: 1.3; }
-    table { border-collapse: collapse; width: 100%; margin-bottom: 0.8em; }
-    td, th { border: 1px solid #ccc; padding: 4px 8px; }
-    ol, ul { margin: 0 0 0.6em; padding-left: 1.4em; }
-    img { max-width: 100%; }
-"""
-
-
 def _convert_to_pdf_if_needed(raw: bytes, filename: str, content_type: str | None) -> bytes:
-    """Convert DOC/DOCX uploads to PDF via mammoth (→ HTML) + weasyprint (→ PDF).
+    """Convert DOC/DOCX uploads to PDF via LibreOffice headless (soffice).
 
-    mammoth only maps Word styles to semantic HTML — it carries no visual
-    styling of its own, so the HTML must be given its own CSS or weasyprint
-    falls back to its bare UA defaults (serif font, no page margins, no
-    paragraph spacing), which looks nothing like the mammoth.js preview shown
-    client-side before signing. _DOCX_PDF_CSS mirrors that client preview's
-    styling (see showDocxPreview() in app/index.html) so both renders agree.
+    LibreOffice is the same engine Word/Google Docs use for "Save As PDF" and
+    preserves footers, headers, precise positioning, tables, centering, and
+    fonts (with Liberation Serif/Sans/Mono as metric-compatible Times/Arial/
+    Courier substitutes — see Dockerfile). The previous mammoth+weasyprint
+    path only mapped Word to semantic HTML and lost all of the above.
 
     Returns raw bytes unchanged for PDF input.
     """
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     ct = (content_type or "").lower().split(";")[0].strip()
     is_docx = ext in ("doc", "docx") or ct in (
@@ -191,17 +176,33 @@ def _convert_to_pdf_if_needed(raw: bytes, filename: str, content_type: str | Non
     )
     if not is_docx:
         return raw
-    try:
-        import io
-        import mammoth
-        import weasyprint
-        body_html = mammoth.convert_to_html(io.BytesIO(raw)).value
-        html = f"<!DOCTYPE html><html><head><meta charset='UTF-8'><style>{_DOCX_PDF_CSS}</style></head><body>{body_html}</body></html>"
-        return weasyprint.HTML(string=html).write_pdf()
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Не удалось конвертировать документ: {e}")
+
+    with tempfile.TemporaryDirectory(prefix="sf-conv-") as tmpdir:
+        safe_ext = ext if ext in ("doc", "docx") else "docx"
+        input_path = Path(tmpdir) / f"in.{safe_ext}"
+        input_path.write_bytes(raw)
+
+        # soffice on a first cold call spends ~2–4s bootstrapping profile+JVM;
+        # subsequent conversions in the same process are ~0.5–1s. A dedicated
+        # per-request profile dir prevents concurrent workers from clobbering
+        # each other's ~/.config/libreoffice.
+        profile_url = f"-env:UserInstallation=file://{tmpdir}/profile"
+        try:
+            proc = subprocess.run(
+                ["soffice", profile_url, "--headless", "--nologo", "--nolockcheck",
+                 "--convert-to", "pdf", "--outdir", tmpdir, str(input_path)],
+                capture_output=True, timeout=90, check=False,
+            )
+        except subprocess.TimeoutExpired:
+            raise HTTPException(status_code=422, detail="Конвертация Word→PDF заняла слишком много времени")
+
+        output_pdf = input_path.with_suffix(".pdf")
+        if proc.returncode != 0 or not output_pdf.exists():
+            stderr = (proc.stderr or b"").decode("utf-8", errors="ignore")[:300]
+            logger.warning("soffice convert failed rc=%s stderr=%s", proc.returncode, stderr)
+            raise HTTPException(status_code=422, detail="Не удалось конвертировать документ")
+
+        return output_pdf.read_bytes()
 
 
 # ── Fix-7: tenant-scoped template matching (Phase A) ───────────────────────────
@@ -476,6 +477,36 @@ async def get_usage(user: UserDep) -> UsageOut:
 
 
 # ── M3: cabinet pipeline ──────────────────────────────────────────────────────
+
+@router.post("/me/convert")
+async def me_convert(
+    user: UserDep,
+    file: UploadFile = File(...),
+) -> Response:
+    """Convert a DOC/DOCX upload to PDF for the cabinet preview.
+
+    Uses the same LibreOffice path as /me/analyze so the pre-signing preview
+    is byte-identical to what gets signed. For PDF uploads this returns the
+    original file unchanged (client can skip the round-trip).
+    """
+    uid = user["firebase_uid"]
+    raw = await file.read()
+    filename = file.filename or "document.docx"
+    if len(raw) > _MAX_DOC_SIZE:
+        mb = len(raw) / (1024 * 1024)
+        raise HTTPException(
+            status_code=413,
+            detail=f"Файл слишком большой ({mb:.1f} МБ). Лимит кабинета: 5 МБ.",
+        )
+    try:
+        pdf_bytes = _convert_to_pdf_if_needed(raw, filename, file.content_type)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning("me/convert failed for user %s: %s", uid, e)
+        raise HTTPException(status_code=422, detail="Не удалось конвертировать документ")
+    return Response(content=pdf_bytes, media_type="application/pdf")
+
 
 @router.post("/me/analyze")
 async def me_analyze(
