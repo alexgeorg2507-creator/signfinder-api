@@ -153,6 +153,73 @@ def _check_doc(pdf_bytes: bytes, filename: str, content_type: str | None = None)
         )
 
 
+def _preprocess_docx_for_libreoffice(docx_bytes: bytes) -> bytes:
+    """Work around three known LibreOffice OOXML-import gaps in word/footer*.xml.
+
+    Verified against this document's real footer XML (not guessed):
+      1. <w:ptab .../alignment="right"/> — LO doesn't right-align positional
+         tabs, page numbers land centered instead of at the right margin.
+         Replaced with a plain <w:tab/>. (Doesn't inject an explicit right
+         tab-stop into the parent <w:pPr> — needs a real-deploy visual check,
+         see Fix-8 task notes.)
+      2. w:themeColor="accent2" + w:themeShade="7F" — LO ignores the shade
+         modifier and paints the raw (bright) accent2 instead of the shaded
+         (dark) color Word renders. Replaced with a flat gray. Keeps whichever
+         attribute name (w:val or w:color) precedes it — the real border XML
+         here is `w:color="622423" w:themeColor="accent2" w:themeShade="7F"`
+         on a <w:top> that ALSO carries an unrelated w:val (border style), so
+         blindly emitting a new w:val would duplicate that attribute.
+      3. w:asciiTheme/w:hAnsiTheme="majorHAnsi" — this document's footer uses
+         the theme's MAJOR font (Cambria), not minor/Calibri. Replaced with
+         explicit Liberation Serif (metric-compatible, ships in the image).
+
+    Returns modified DOCX bytes. If parsing fails — returns input unchanged
+    (fail-safe, LibreOffice will render as-is).
+    """
+    import io
+    import re
+    import zipfile
+
+    try:
+        buf_in = io.BytesIO(docx_bytes)
+        buf_out = io.BytesIO()
+        with zipfile.ZipFile(buf_in, "r") as zin, \
+             zipfile.ZipFile(buf_out, "w", zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                if item.filename.startswith("word/footer") and item.filename.endswith(".xml"):
+                    text = data.decode("utf-8", errors="ignore")
+
+                    # 1. <w:ptab ... w:alignment="right" ... /> → <w:tab/>
+                    text = re.sub(
+                        r'<w:ptab\b[^/]*w:alignment="right"[^/]*/>',
+                        '<w:tab/>',
+                        text,
+                    )
+
+                    # 2. (w:val|w:color)="RRGGBB" + themeColor="accent2" [+ themeTint]
+                    #    [+ themeShade="7F"] → same attribute name = "808080".
+                    text = re.sub(
+                        r'(w:val|w:color)="[0-9A-Fa-f]{6}"'
+                        r'(\s+w:themeColor="accent2")'
+                        r'(\s+w:themeTint="[^"]*")?'
+                        r'(\s+w:themeShade="7F")?',
+                        lambda m: f'{m.group(1)}="808080"',
+                        text,
+                    )
+
+                    # 3. asciiTheme/hAnsiTheme majorHAnsi → explicit Liberation Serif
+                    text = re.sub(r'w:asciiTheme="majorHAnsi"', 'w:ascii="Liberation Serif"', text)
+                    text = re.sub(r'w:hAnsiTheme="majorHAnsi"', 'w:hAnsi="Liberation Serif"', text)
+
+                    data = text.encode("utf-8")
+                zout.writestr(item, data)
+        return buf_out.getvalue()
+    except Exception as e:
+        logger.warning("DOCX preprocessing failed: %s, using original bytes", e)
+        return docx_bytes
+
+
 def _convert_to_pdf_if_needed(raw: bytes, filename: str, content_type: str | None) -> bytes:
     """Convert DOC/DOCX uploads to PDF via LibreOffice headless (soffice).
 
@@ -176,6 +243,8 @@ def _convert_to_pdf_if_needed(raw: bytes, filename: str, content_type: str | Non
     )
     if not is_docx:
         return raw
+
+    raw = _preprocess_docx_for_libreoffice(raw)
 
     with tempfile.TemporaryDirectory(prefix="sf-conv-") as tmpdir:
         safe_ext = ext if ext in ("doc", "docx") else "docx"
