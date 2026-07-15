@@ -154,7 +154,11 @@ def _check_doc(pdf_bytes: bytes, filename: str, content_type: str | None = None)
 
 
 def _preprocess_docx_for_libreoffice(docx_bytes: bytes) -> bytes:
-    """Work around three known LibreOffice OOXML-import gaps in word/footer*.xml.
+    """Work around three known LibreOffice OOXML-import gaps in word/footer*.xml
+    and word/header*.xml (this document has no headers — word/_rels/document.xml.rels
+    carries zero header relationships, sectPr has no <w:headerReference> — the
+    header branch is untested against real header XML, included for future
+    documents that do have one; if there's nothing to match, the loop is a no-op).
 
     Verified against this document's real footer XML (not guessed):
       1. <w:ptab .../alignment="right"/> — LO doesn't right-align positional
@@ -187,7 +191,8 @@ def _preprocess_docx_for_libreoffice(docx_bytes: bytes) -> bytes:
              zipfile.ZipFile(buf_out, "w", zipfile.ZIP_DEFLATED) as zout:
             for item in zin.infolist():
                 data = zin.read(item.filename)
-                if item.filename.startswith("word/footer") and item.filename.endswith(".xml"):
+                if (item.filename.startswith("word/footer") or item.filename.startswith("word/header")) \
+                        and item.filename.endswith(".xml"):
                     text = data.decode("utf-8", errors="ignore")
 
                     # 1. <w:ptab ... w:alignment="right" ... /> → <w:tab/>
