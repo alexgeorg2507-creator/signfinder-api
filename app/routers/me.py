@@ -154,28 +154,40 @@ def _check_doc(pdf_bytes: bytes, filename: str, content_type: str | None = None)
 
 
 def _preprocess_docx_for_libreoffice(docx_bytes: bytes) -> bytes:
-    """Work around three known LibreOffice OOXML-import gaps in word/footer*.xml
+    """Work around one confirmed LibreOffice OOXML-import gap in word/footer*.xml
     and word/header*.xml (this document has no headers — word/_rels/document.xml.rels
     carries zero header relationships, sectPr has no <w:headerReference> — the
     header branch is untested against real header XML, included for future
     documents that do have one; if there's nothing to match, the loop is a no-op).
 
-    Verified against this document's real footer XML (not guessed):
-      1. <w:ptab .../alignment="right"/> — LO doesn't right-align positional
-         tabs, page numbers land centered instead of at the right margin.
-         Replaced with a plain <w:tab/>. (Doesn't inject an explicit right
-         tab-stop into the parent <w:pPr> — needs a real-deploy visual check,
-         see Fix-8 task notes.)
-      2. w:themeColor="accent2" + w:themeShade="7F" — LO ignores the shade
-         modifier and paints the raw (bright) accent2 instead of the shaded
-         (dark) color Word renders. Replaced with a flat gray. Keeps whichever
-         attribute name (w:val or w:color) precedes it — the real border XML
-         here is `w:color="622423" w:themeColor="accent2" w:themeShade="7F"`
-         on a <w:top> that ALSO carries an unrelated w:val (border style), so
-         blindly emitting a new w:val would duplicate that attribute.
-      3. w:asciiTheme/w:hAnsiTheme="majorHAnsi" — this document's footer uses
-         the theme's MAJOR font (Cambria), not minor/Calibri. Replaced with
-         explicit Liberation Serif (metric-compatible, ships in the image).
+    Fix-9 A.2 revised this against two real PDFs (not assumption): a genuine
+    Word "Save As PDF" export (reference_word_export.pdf) and the RAW,
+    unpatched LibreOffice conversion of the same DOCX (predates any
+    preprocessing). Measuring both directly with PyMuPDF settled all three
+    Fix-8.C guesses:
+
+      1. KEPT — <w:ptab .../alignment="right"/> → <w:tab/>. Raw LO output put
+         "Страница N"'s text-center at x=266pt (page width 595pt, i.e. near
+         page-center ~298pt — centered). The Word reference has it at x=520pt
+         (near the right margin). LO doesn't honor a right-aligned positional
+         tab; bare <w:tab/> fixes it — confirmed by measurement, not guessed.
+      2. CHANGED — the border/line color. Word's own PDF renders it as
+         RGB(98,36,35) = #622423 — which is EXACTLY the literal w:color
+         already sitting next to the theme attributes in the source XML
+         (`w:color="622423" w:themeColor="accent2" w:themeShade="7F"`). Fix-8.C
+         invented a gray substitute (#808080); that was never going to match.
+         The correct fix is simpler: strip the w:themeColor/w:themeTint/
+         w:themeShade attributes and leave the pre-existing literal w:color
+         (or w:val) alone — Word already computed the right fallback, LO just
+         needs to be pointed at it instead of resolving the theme itself.
+      3. REMOVED — the majorHAnsi→"Liberation Serif" font override. The Word
+         reference PDF's font list (page.get_text("dict") spans) genuinely
+         includes "Cambria" — confirmed, not assumed. Forcing "Liberation
+         Serif" (a Times substitute) in the XML pre-empts LibreOffice's own
+         Cambria→Caladea substitution, which is already provisioned in the
+         Dockerfile (fonts-crosextra-caladea) and would have been the correct
+         metric-compatible match. Rewriting the font name was actively worse
+         than leaving it alone.
 
     Returns modified DOCX bytes. If parsing fails — returns input unchanged
     (fail-safe, LibreOffice will render as-is).
@@ -202,20 +214,16 @@ def _preprocess_docx_for_libreoffice(docx_bytes: bytes) -> bytes:
                         text,
                     )
 
-                    # 2. (w:val|w:color)="RRGGBB" + themeColor="accent2" [+ themeTint]
-                    #    [+ themeShade="7F"] → same attribute name = "808080".
+                    # 2. Strip theme color resolution, keep Word's own literal
+                    #    fallback (whichever attribute — w:val or w:color —
+                    #    precedes it) untouched.
                     text = re.sub(
-                        r'(w:val|w:color)="[0-9A-Fa-f]{6}"'
-                        r'(\s+w:themeColor="accent2")'
+                        r'\s+w:themeColor="accent2"'
                         r'(\s+w:themeTint="[^"]*")?'
-                        r'(\s+w:themeShade="7F")?',
-                        lambda m: f'{m.group(1)}="808080"',
+                        r'(\s+w:themeShade="[^"]*")?',
+                        '',
                         text,
                     )
-
-                    # 3. asciiTheme/hAnsiTheme majorHAnsi → explicit Liberation Serif
-                    text = re.sub(r'w:asciiTheme="majorHAnsi"', 'w:ascii="Liberation Serif"', text)
-                    text = re.sub(r'w:hAnsiTheme="majorHAnsi"', 'w:hAnsi="Liberation Serif"', text)
 
                     data = text.encode("utf-8")
                 zout.writestr(item, data)
@@ -288,28 +296,53 @@ def _tenant_template_match(tenant_storage: TenantScopedStorage, pdf_bytes: bytes
     but against tenant_storage instead of the global storage, so a green match
     only comes from templates this tenant remembered via /me/templates/remember.
 
-    Returns (doc, lang_fast, fingerprint, tpl, tpl_matches, tpl_anchors).
+    Returns (doc, lang_fast, fingerprint, tpl, tpl_matches, tpl_anchors, debug).
     tpl is None when there's no usable green match — doc/lang_fast/fingerprint
     are still returned so the caller can reuse them on the LLM fallback path.
+
+    Fix-9 B.1: `debug` carries diagnostics for the "remember saved, analyze
+    finds nothing" symptom — listed unfiltered (before find_matching_templates'
+    own language filter) so "physically 0 stored" can be told apart from
+    "stored but filtered out by language" from pipeline_debug alone, without
+    re-deriving it from guesswork every time it recurs.
     """
     import fitz
 
     from signfinder.fingerprint import compute_fingerprint
     from signfinder.pdf import detect_language_fast, parse_pdf_bytes
     from signfinder.pipeline import apply_template_to_doc
-    from signfinder.templates import find_matching_templates, load_template, update_usage_stats
+    from signfinder.templates import find_matching_templates, list_templates, load_template, update_usage_stats
+
+    debug: dict = {"templates_storage_prefix": f"me/{tenant_storage._tenant_id}/templates/"}
 
     doc = parse_pdf_bytes(pdf_bytes, filename=filename)
     lang_fast = detect_language_fast(doc) or "ru"
+    debug["templates_match_language"] = lang_fast
 
     fitz_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     try:
         fingerprint = compute_fingerprint(fitz_doc, lang_fast)
+
+        all_templates = list_templates(tenant_storage)  # unfiltered — see debug docstring above
+        debug["templates_listed_count"] = len(all_templates)
+        debug["templates_listed_languages"] = [t.language for t in all_templates]
+
         matcher = find_matching_templates(
             fitz_doc, lang_fast, storage=tenant_storage, fingerprint=fingerprint,
         )
     finally:
         fitz_doc.close()
+
+    debug["templates_traffic_light"] = matcher.traffic_light
+    debug["best_match_score_details"] = (
+        {
+            "template_id": matcher.best_match.template_id,
+            "score": matcher.best_match.score,
+            "score_breakdown": matcher.best_match.score_breakdown,
+            "synonyms_match": matcher.best_match.synonyms_match,
+        }
+        if matcher.best_match else None
+    )
 
     if matcher.traffic_light == "green" and matcher.best_match:
         tpl = load_template(tenant_storage, matcher.best_match.template_id)
@@ -320,9 +353,9 @@ def _tenant_template_match(tenant_storage: TenantScopedStorage, pdf_bytes: bytes
                     update_usage_stats(tenant_storage, matcher.best_match.template_id, "applied")
                 except Exception:
                     logger.warning("update_usage_stats failed for %s", matcher.best_match.template_id)
-                return doc, lang_fast, fingerprint, tpl, tpl_matches, tpl_anchors
+                return doc, lang_fast, fingerprint, tpl, tpl_matches, tpl_anchors, debug
 
-    return doc, lang_fast, fingerprint, None, None, None
+    return doc, lang_fast, fingerprint, None, None, None, debug
 
 
 def _build_synonyms_used(doc, language: str, our_side: dict) -> dict:
@@ -617,8 +650,9 @@ async def me_analyze(
     # Fix-7 Phase A: try this tenant's own remembered templates before the LLM.
     # Failure here must never break analysis — fall through to the LLM path.
     doc = lang_fast = fingerprint = tpl = tpl_matches = tpl_anchors = None
+    tenant_debug: dict = {}
     try:
-        doc, lang_fast, fingerprint, tpl, tpl_matches, tpl_anchors = _tenant_template_match(
+        doc, lang_fast, fingerprint, tpl, tpl_matches, tpl_anchors, tenant_debug = _tenant_template_match(
             tenant_storage, pdf_bytes, filename,
         )
     except Exception as e:
@@ -632,6 +666,7 @@ async def me_analyze(
             anchors=tpl_anchors,
             matches=tpl_matches,
             fingerprint=fingerprint,
+            pipeline_debug=tenant_debug,
         )
         resp = AnalysisResponse.from_result(result)
         resp.from_template = True
@@ -655,12 +690,13 @@ async def me_analyze(
             applied_template_id=None,
             our_side=None,
             error=str(e),
-            pipeline_debug={},
+            pipeline_debug=tenant_debug,
             from_template=False,
         )
 
     resp = AnalysisResponse.from_result(result)
     resp.from_template = False
+    resp.pipeline_debug = {**tenant_debug, **(resp.pipeline_debug or {})}
     if resp.fingerprint is None:
         resp.fingerprint = fingerprint
     if doc is not None and lang_fast and result.our_side:
