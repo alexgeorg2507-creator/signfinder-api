@@ -154,7 +154,7 @@ def _check_doc(pdf_bytes: bytes, filename: str, content_type: str | None = None)
 
 
 def _preprocess_docx_for_libreoffice(docx_bytes: bytes) -> bytes:
-    """Work around one confirmed LibreOffice OOXML-import gap in word/footer*.xml
+    """Work around confirmed LibreOffice OOXML-import gaps in word/footer*.xml
     and word/header*.xml (this document has no headers — word/_rels/document.xml.rels
     carries zero header relationships, sectPr has no <w:headerReference> — the
     header branch is untested against real header XML, included for future
@@ -162,32 +162,32 @@ def _preprocess_docx_for_libreoffice(docx_bytes: bytes) -> bytes:
 
     Fix-9 A.2 revised this against two real PDFs (not assumption): a genuine
     Word "Save As PDF" export (reference_word_export.pdf) and the RAW,
-    unpatched LibreOffice conversion of the same DOCX (predates any
-    preprocessing). Measuring both directly with PyMuPDF settled all three
-    Fix-8.C guesses:
+    unpatched LibreOffice conversion of the same DOCX. Measuring both directly
+    with PyMuPDF settled all three Fix-8.C guesses — and Fix-9's own first
+    attempt at #1 was itself re-measured against a real deployed conversion
+    and found to still be wrong, corrected below:
 
-      1. KEPT — <w:ptab .../alignment="right"/> → <w:tab/>. Raw LO output put
-         "Страница N"'s text-center at x=266pt (page width 595pt, i.e. near
-         page-center ~298pt — centered). The Word reference has it at x=520pt
-         (near the right margin). LO doesn't honor a right-aligned positional
-         tab; bare <w:tab/> fixes it — confirmed by measurement, not guessed.
-      2. CHANGED — the border/line color. Word's own PDF renders it as
-         RGB(98,36,35) = #622423 — which is EXACTLY the literal w:color
-         already sitting next to the theme attributes in the source XML
-         (`w:color="622423" w:themeColor="accent2" w:themeShade="7F"`). Fix-8.C
-         invented a gray substitute (#808080); that was never going to match.
-         The correct fix is simpler: strip the w:themeColor/w:themeTint/
-         w:themeShade attributes and leave the pre-existing literal w:color
-         (or w:val) alone — Word already computed the right fallback, LO just
-         needs to be pointed at it instead of resolving the theme itself.
-      3. REMOVED — the majorHAnsi→"Liberation Serif" font override. The Word
-         reference PDF's font list (page.get_text("dict") spans) genuinely
-         includes "Cambria" — confirmed, not assumed. Forcing "Liberation
-         Serif" (a Times substitute) in the XML pre-empts LibreOffice's own
-         Cambria→Caladea substitution, which is already provisioned in the
-         Dockerfile (fonts-crosextra-caladea) and would have been the correct
-         metric-compatible match. Rewriting the font name was actively worse
-         than leaving it alone.
+      1. <w:ptab .../alignment="right"/>. Raw LO output put "Страница N"'s
+         text-center at x=266pt (page width 595pt — centered). The Word
+         reference has it at x=520pt (near the right margin). Fix-9's first
+         attempt replaced the ptab run with a bare <w:tab/> and, without
+         re-measuring the actual deployed output, was assumed to fix this.
+         It didn't: measured against a real converted PDF, the bare tab
+         landed at x=266.2 — byte-for-byte the same as doing nothing, because
+         a tab character with no declared tab-stop has nowhere to jump to.
+         Fixed properly now: inject an explicit right-aligned w:tabs entry
+         into that paragraph's w:pPr, positioned at this document's own
+         (page width − left margin − right margin), read from its own
+         w:sectPr rather than hardcoded — plus the same bare-tab swap.
+      2. Border/line color — CONFIRMED CORRECT by re-measurement. A real
+         converted PDF renders the line at RGB(98,36,34) = #622422, matching
+         the Word reference's #622423 (1-unit rounding). Stripping
+         w:themeColor/w:themeTint/w:themeShade and keeping Word's own
+         literal w:color fallback works as intended.
+      3. Font — CONFIRMED CORRECT by re-measurement. A real converted PDF's
+         font list includes "Caladea-Regular" — LibreOffice's own
+         Cambria→Caladea substitution firing exactly as expected once the
+         XML stopped overriding the font name to Liberation Serif.
 
     Returns modified DOCX bytes. If parsing fails — returns input unchanged
     (fail-safe, LibreOffice will render as-is).
@@ -201,17 +201,56 @@ def _preprocess_docx_for_libreoffice(docx_bytes: bytes) -> bytes:
         buf_out = io.BytesIO()
         with zipfile.ZipFile(buf_in, "r") as zin, \
              zipfile.ZipFile(buf_out, "w", zipfile.ZIP_DEFLATED) as zout:
+
+            # Right-margin tab-stop position (twips from the left margin),
+            # computed from this document's own section properties instead of
+            # a hardcoded number — a bare <w:tab/> alone has nothing to jump
+            # to and is a no-op (measured, see docstring point 1).
+            right_tab_pos: int | None = None
+            try:
+                doc_xml = zin.read("word/document.xml").decode("utf-8", errors="ignore")
+                pg_w_m = re.search(r'<w:pgSz\b[^>]*\bw:w="(\d+)"', doc_xml)
+                pg_left_m = re.search(r'<w:pgMar\b[^>]*\bw:left="(\d+)"', doc_xml)
+                pg_right_m = re.search(r'<w:pgMar\b[^>]*\bw:right="(\d+)"', doc_xml)
+                if pg_w_m and pg_left_m and pg_right_m:
+                    right_tab_pos = int(pg_w_m.group(1)) - int(pg_left_m.group(1)) - int(pg_right_m.group(1))
+            except KeyError:
+                pass  # no word/document.xml — not a valid docx, let soffice report it
+
+            def _fix_ptab_paragraph(m: re.Match) -> str:
+                para = m.group(0)
+                para = re.sub(
+                    r'<w:ptab\b[^/]*w:alignment="right"[^/]*/>',
+                    '<w:tab/>',
+                    para,
+                )
+                if right_tab_pos is not None:
+                    tabs_xml = f'<w:tabs><w:tab w:val="right" w:pos="{right_tab_pos}"/></w:tabs>'
+                    # w:tabs must sit after w:pBdr/w:shd and before w:rPr in
+                    # w:pPr's fixed child order (ECMA-376) — insert at whichever
+                    # of those boundaries is actually present in this paragraph.
+                    if '</w:pBdr>' in para:
+                        para = para.replace('</w:pBdr>', '</w:pBdr>' + tabs_xml, 1)
+                    elif '<w:rPr>' in para:
+                        para = para.replace('<w:rPr>', tabs_xml + '<w:rPr>', 1)
+                    else:
+                        para = para.replace('</w:pPr>', tabs_xml + '</w:pPr>', 1)
+                return para
+
             for item in zin.infolist():
                 data = zin.read(item.filename)
                 if (item.filename.startswith("word/footer") or item.filename.startswith("word/header")) \
                         and item.filename.endswith(".xml"):
                     text = data.decode("utf-8", errors="ignore")
 
-                    # 1. <w:ptab ... w:alignment="right" ... /> → <w:tab/>
+                    # 1. Paragraph containing a right-aligned positional tab:
+                    #    inject an explicit right w:tabs entry + swap the ptab
+                    #    run for a plain tab character.
                     text = re.sub(
-                        r'<w:ptab\b[^/]*w:alignment="right"[^/]*/>',
-                        '<w:tab/>',
+                        r'<w:p\b.*?<w:ptab\b[^/]*w:alignment="right"[^/]*/>.*?</w:p>',
+                        _fix_ptab_paragraph,
                         text,
+                        flags=re.DOTALL,
                     )
 
                     # 2. Strip theme color resolution, keep Word's own literal
