@@ -793,6 +793,70 @@ async def forget_template(template_id: str, user: UserDep, sf: SignFinderDep) ->
         raise HTTPException(status_code=404, detail=f"Шаблон '{template_id}' не найден")
 
 
+class ManualAnchorProbeOut(BaseModel):
+    anchor_text: str
+    anchor_bbox: list[float] | None  # [x0,y0,x1,y1] pt, найденного текста-ориентира
+    offset_dx: float                  # смещение от anchor_bbox.x0 до placed bbox.x
+    offset_dy: float                  # смещение от anchor_bbox.y0 до placed bbox.y
+
+
+@router.post("/me/manual-anchor/probe", response_model=ManualAnchorProbeOut)
+async def probe_manual_anchor(
+    user: UserDep,
+    file: UploadFile = File(...),
+    page: int = Form(...),          # 1-indexed
+    x: float = Form(...),
+    y: float = Form(...),
+    width: float = Form(...),
+    height: float = Form(...),
+) -> Any:
+    """Find the nearest text landmark for a manually-placed signature spot and
+    return the placed bbox's offset from it.
+
+    Called once when the operator confirms a manual click (✓ in the UI) —
+    before the point is added to _manualAnchors. No side effects, the file is
+    not saved (same principle as /me/signature/process).
+    """
+    raw = await file.read()
+    filename = file.filename or "document.pdf"
+    pdf_bytes = _convert_to_pdf_if_needed(raw, filename, file.content_type)
+
+    import fitz
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        page_idx = page - 1
+        if page_idx < 0 or page_idx >= len(doc):
+            raise HTTPException(status_code=422, detail="Неверный номер страницы")
+        pdf_page = doc[page_idx]
+
+        # get_text("words") -> [(x0,y0,x1,y1,text,block_no,line_no,word_no), ...]
+        words = pdf_page.get_text("words")
+        click_cx, click_cy = x + width / 2, y + height / 2
+
+        def _dist(w):
+            wx0, wy0, wx1, wy1 = w[0], w[1], w[2], w[3]
+            wcx, wcy = (wx0 + wx1) / 2, (wy0 + wy1) / 2
+            return ((wcx - click_cx) ** 2 + (wcy - click_cy) ** 2) ** 0.5
+
+        # Радиус поиска — 150pt, дальше считаем что рядом ничего значимого нет
+        nearby = [w for w in words if _dist(w) <= 150 and len(w[4].strip()) >= 2]
+        if not nearby:
+            return ManualAnchorProbeOut(
+                anchor_text="", anchor_bbox=None, offset_dx=0.0, offset_dy=0.0,
+            )
+
+        nearest = min(nearby, key=_dist)
+        nx0, ny0 = nearest[0], nearest[1]
+        return ManualAnchorProbeOut(
+            anchor_text=nearest[4],
+            anchor_bbox=[nearest[0], nearest[1], nearest[2], nearest[3]],
+            offset_dx=x - nx0,
+            offset_dy=y - ny0,
+        )
+    finally:
+        doc.close()
+
+
 @router.post("/me/sign")
 async def me_sign(
     user: UserDep,
