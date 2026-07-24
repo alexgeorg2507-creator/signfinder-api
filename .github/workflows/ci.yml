@@ -56,6 +56,27 @@ jobs:
             "https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/${CLOUD_SQL_PROXY_VERSION}/cloud-sql-proxy.linux.amd64"
           chmod +x /usr/local/bin/cloud-sql-proxy
 
+      # Same pattern as deploy-prod.yml's "alembic upgrade head (prod DB)" step,
+      # against signfinder-cab-test instead. Previously migrations were only
+      # ever applied to test/prod manually — CI ran pytest against whatever
+      # schema happened to already be there, so a PR introducing a new
+      # migration (e.g. 003_deals) had no way to get it applied before its
+      # own tests ran. This closes that gap for test; prod still requires the
+      # explicit workflow_dispatch in deploy-prod.yml (ADR-008).
+      - name: Apply Alembic migrations to signfinder-cab-test
+        run: |
+          set -e
+          cloud-sql-proxy signfinder-cab-test:europe-west1:signfinder-db --port 5432 &
+          PROXY_PID=$!
+          sleep 5
+          PW=$(gcloud secrets versions access latest --secret=db-password --project=signfinder-cab-test)
+          echo "::add-mask::$PW"
+          PW_ENC=$(PW="$PW" python3 -c "import os, urllib.parse; print(urllib.parse.quote(os.environ['PW'], safe=''))")
+          echo "::add-mask::$PW_ENC"
+          export DATABASE_URL="postgresql+asyncpg://signfinder:${PW_ENC}@127.0.0.1:5432/signfinder"
+          alembic upgrade head
+          kill $PROXY_PID
+
       - name: Run tests (against real signfinder-cab-test DB via Cloud SQL Auth Proxy)
         run: pytest tests/
 
