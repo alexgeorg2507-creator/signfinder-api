@@ -79,6 +79,13 @@ class AnalysisResponse(BaseModel):
     template_name: Optional[str] = None
     synonyms_used: Optional[dict[str, Any]] = None
 
+    # Deal Cycle (2026-07-25, signfinder-core v1.21.0): counterparty's
+    # signature-location anchors, resolved best-effort in the same analyze
+    # pass. Empty lists if the pipeline couldn't determine a counterparty
+    # or found nothing for it — see AnalysisResult.counterparty_anchors.
+    counterparty_anchors: list[AnchorResponse] = []
+    counterparty_matches: list[SignMatchResponse] = []
+
     @staticmethod
     def _review_from_dict(rev: Optional[dict]) -> Optional["ReviewResponse"]:
         if not rev:
@@ -100,14 +107,13 @@ class AnalysisResponse(BaseModel):
             truncated=rev.get("truncated", False),
         )
 
-    @classmethod
-    def from_result(cls, result) -> "AnalysisResponse":
-        """Конвертирует AnalysisResult из signfinder-core."""
-        # TextAnchor → AnchorResponse
-        anchors = []
-        for a in (result.anchors or []):
+    @staticmethod
+    def _convert_anchors(anchors) -> list["AnchorResponse"]:
+        """TextAnchor (signfinder-core) → AnchorResponse."""
+        out = []
+        for a in (anchors or []):
             try:
-                anchors.append(AnchorResponse(**{
+                out.append(AnchorResponse(**{
                     k: getattr(a, k)
                     for k in ("id", "anchor_level", "anchor_text", "position",
                                "generated_pattern", "bbox", "added_by", "page_hint")
@@ -115,18 +121,30 @@ class AnalysisResponse(BaseModel):
                 }))
             except Exception:
                 pass
+        return out
 
-        # SignMatch → SignMatchResponse
-        matches = []
-        for m in (result.matches or []):
+    @staticmethod
+    def _convert_matches(matches) -> list["SignMatchResponse"]:
+        """SignMatch (signfinder-core) → SignMatchResponse."""
+        out = []
+        for m in (matches or []):
             try:
-                matches.append(SignMatchResponse(**{
+                out.append(SignMatchResponse(**{
                     k: getattr(m, k)
                     for k in ("id", "page", "bbox", "context", "party", "pattern", "confidence")
                     if hasattr(m, k)
                 }))
             except Exception:
                 pass
+        return out
+
+    @classmethod
+    def from_result(cls, result) -> "AnalysisResponse":
+        """Конвертирует AnalysisResult из signfinder-core."""
+        anchors = cls._convert_anchors(result.anchors)
+        matches = cls._convert_matches(result.matches)
+        counterparty_anchors = cls._convert_anchors(getattr(result, "counterparty_anchors", None))
+        counterparty_matches = cls._convert_matches(getattr(result, "counterparty_matches", None))
 
         # MatcherResult
         matcher_resp = None
@@ -162,6 +180,8 @@ class AnalysisResponse(BaseModel):
             fingerprint=getattr(result, "fingerprint", None),
             detected_signer_id=getattr(result, "detected_signer_id", None),
             review=cls._review_from_dict(getattr(result, "review", None)),
+            counterparty_anchors=counterparty_anchors,
+            counterparty_matches=counterparty_matches,
         )
 
 
