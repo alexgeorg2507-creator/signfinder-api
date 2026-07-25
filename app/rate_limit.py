@@ -21,4 +21,14 @@ def get_share_token_key(request: Request) -> str:
     return request.path_params.get("share_token", "unknown")
 
 
-limiter = Limiter(key_func=get_client_ip)
+# key_style="endpoint" (default is "url"): our public routes have
+# share_token IN the URL path itself (/v1/public/deals/{share_token}), so
+# the default url-based scope would fragment the per-IP limiter into one
+# independent bucket per token — defeating it entirely, since every request
+# in practice hits a different token. Scoping by endpoint (function name,
+# constant across tokens) keeps each Limit's own key_func as the only thing
+# that varies, which is what actually distinguishes per-token vs per-IP.
+# Confirmed empirically: with the default url style, 61 requests across 61
+# distinct tokens from the "same IP" never tripped the 60/minute limit at
+# all (each token got its own untouched bucket).
+limiter = Limiter(key_func=get_client_ip, key_style="endpoint")
