@@ -8,9 +8,12 @@ from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
+from app.rate_limit import limiter
 from app.routers import audit, internal, jobs, parties, pipeline, settings, signers, system, templates
-from app.routers import llm_config, signature_process, corpus, agent, me, deals
+from app.routers import llm_config, signature_process, corpus, agent, me, deals, deals_public
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -20,7 +23,7 @@ _API_PREFIX = "/api"
 # Dockerfile copies only app/ (no `pip install .` of this distribution), so
 # package metadata isn't registered in the production image — fall back to a
 # literal kept in sync with pyproject.toml's [project].version.
-_FALLBACK_API_VERSION = "1.19.0"
+_FALLBACK_API_VERSION = "1.19.1"
 try:
     _API_VERSION = _pkg_version("signfinder-api")
 except PackageNotFoundError:
@@ -124,6 +127,10 @@ app = FastAPI(
     openapi_url="/openapi.json",
 )
 
+# Deal Cycle E2: rate limiting for /v1/public/deals/* (THREAT_MODEL_DEAL_CYCLE.md §3.A)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 
 @app.middleware("http")
 async def strip_api_prefix(request, call_next):
@@ -136,6 +143,19 @@ async def strip_api_prefix(request, call_next):
         request.scope["path"] = "/"
         request.scope["raw_path"] = b"/"
     return await call_next(request)
+
+
+@app.middleware("http")
+async def public_deal_security_headers(request, call_next):
+    """CSP/X-Content-Type-Options/X-Frame-Options for the anonymous public
+    signing endpoints only (THREAT_MODEL_DEAL_CYCLE.md §3.H) — not applied
+    globally to avoid affecting /docs, /redoc, or the authenticated API."""
+    response = await call_next(request)
+    if request.url.path.startswith("/v1/public/"):
+        response.headers["Content-Security-Policy"] = "default-src 'self'"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+    return response
 
 app.add_middleware(
     CORSMiddleware,
@@ -159,3 +179,4 @@ app.include_router(agent.router)
 app.include_router(internal.router, tags=["Internal"])
 app.include_router(me.router, prefix="/v1", tags=["Cabinet"])
 app.include_router(deals.router, prefix="/v1")
+app.include_router(deals_public.router, prefix="/v1")
