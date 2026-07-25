@@ -35,7 +35,8 @@ RUN pip install --no-cache-dir \
     "pydantic>=2.5" \
     "firebase-admin>=6.5" \
     "asyncpg>=0.29" \
-    "nanoid>=2.0"
+    "nanoid>=2.0" \
+    "slowapi>=0.1.9"
 
 # Копируем код
 COPY app/ ./app/
