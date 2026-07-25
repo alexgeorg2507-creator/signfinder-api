@@ -17,9 +17,9 @@ from __future__ import annotations
 import base64
 import logging
 from datetime import datetime, timezone
-from uuid import UUID, uuid4
+from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 
 from app.db import get_pool
@@ -227,6 +227,50 @@ async def sign_public_deal(request: Request, share_token: str, body: DealSignReq
         raise HTTPException(status_code=409, detail="Сделка уже подписана или недоступна")
 
     return {"status": "signed"}
+
+
+_MAX_SIG_PREVIEW_UPLOAD = 5 * 1024 * 1024  # 5 MB, matches signature_process.py
+
+
+@router.post("/public/deals/{share_token}/signature/preview")
+@limiter.limit("10/minute", key_func=get_share_token_key)
+@limiter.limit("60/minute", key_func=get_client_ip)
+async def preview_public_signature(
+    request: Request, share_token: str, file: UploadFile = File(...),
+) -> dict:
+    """Live preview of the processed signature before signing (§3.1 —
+    photo/file/canvas -> preview with confidence, same UX as the cabinet's
+    /v1/signers/{id}/signature/process).
+
+    Not a proxy to that endpoint: it's ApiKeyDep-protected with the internal
+    API_KEY, which a public anonymous page cannot hold client-side without
+    leaking it. This calls the same underlying process_signature() directly
+    instead — stateless, doesn't touch the deal or persist anything, so no
+    auth beyond "this deal exists" is needed.
+    """
+    deal = await _fetch_deal_with_email(share_token)
+    if deal is None:
+        raise HTTPException(status_code=404, detail="Сделка не найдена")
+
+    if not (file.content_type or "").startswith("image/"):
+        raise HTTPException(status_code=422, detail="Только изображения (PNG/JPG/HEIC)")
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=422, detail="Пустой файл")
+    if len(raw) > _MAX_SIG_PREVIEW_UPLOAD:
+        raise HTTPException(status_code=422, detail="Файл слишком большой (макс 5МБ)")
+
+    from signfinder.signature import process_signature
+    try:
+        result = process_signature(raw)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Ошибка обработки: {e}")
+
+    return {
+        "processed_png_b64": base64.b64encode(result.png_bytes).decode(),
+        "confidence": result.confidence,
+        "warnings": result.warnings,
+    }
 
 
 @router.get("/public/deals/{share_token}/final-pdf")

@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import fitz
 import pytest
 
-from tests.conftest import TINY_PNG_B64, USER_A, USER_B
+from tests.conftest import TINY_PNG_B64, TINY_PNG_BYTES, USER_A, USER_B
 
 _FAKE_ORIGINAL_PDF_B64 = base64.b64encode(b"%PDF-1.4 fake original").decode()
 _FAKE_SIGNED_PDF_B64 = base64.b64encode(b"%PDF-1.4 fake initiator-signed").decode()
@@ -186,3 +186,27 @@ def test_sign_extra_fields_422(client_as, client):
     }
     r = client.post(f"/v1/public/deals/{deal['share_token']}/sign", json=payload)
     assert r.status_code == 422
+
+
+# ── signature preview (no auth, needed since the internal
+#    /v1/signers/{id}/signature/process is ApiKeyDep-protected and a public
+#    anonymous page can't hold that secret) ──────────────────────────────────
+
+def test_signature_preview_no_auth(client_as, client):
+    deal = _create_sent_deal(client_as)
+    r = client.post(
+        f"/v1/public/deals/{deal['share_token']}/signature/preview",
+        files={"file": ("sig.png", TINY_PNG_BYTES, "image/png")},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert "processed_png_b64" in body
+    assert "confidence" in body
+
+
+def test_signature_preview_invalid_token_404(client):
+    r = client.post(
+        "/v1/public/deals/does-not-exist-token-000000000000/signature/preview",
+        files={"file": ("sig.png", TINY_PNG_BYTES, "image/png")},
+    )
+    assert r.status_code == 404
