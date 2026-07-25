@@ -34,7 +34,8 @@ RUN pip install --no-cache-dir \
     "httpx>=0.27" \
     "pydantic>=2.5" \
     "firebase-admin>=6.5" \
-    "asyncpg>=0.29"
+    "asyncpg>=0.29" \
+    "nanoid>=2.0"
 
 # Копируем код
 COPY app/ ./app/
