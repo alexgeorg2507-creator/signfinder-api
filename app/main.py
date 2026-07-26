@@ -13,7 +13,7 @@ from slowapi.errors import RateLimitExceeded
 
 from app.rate_limit import limiter
 from app.routers import audit, internal, jobs, parties, pipeline, settings, signers, system, templates
-from app.routers import llm_config, signature_process, corpus, agent, me, deals, deals_public, deals_internal
+from app.routers import llm_config, signature_process, corpus, agent, me, deals, deals_public, deals_internal, feedback
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -23,7 +23,7 @@ _API_PREFIX = "/api"
 # Dockerfile copies only app/ (no `pip install .` of this distribution), so
 # package metadata isn't registered in the production image — fall back to a
 # literal kept in sync with pyproject.toml's [project].version.
-_FALLBACK_API_VERSION = "1.19.4"
+_FALLBACK_API_VERSION = "1.19.5"
 try:
     _API_VERSION = _pkg_version("signfinder-api")
 except PackageNotFoundError:
@@ -178,6 +178,7 @@ app.include_router(corpus.router, prefix="/v1", tags=["Corpus"])
 app.include_router(agent.router)
 app.include_router(internal.router, tags=["Internal"])
 app.include_router(me.router, prefix="/v1", tags=["Cabinet"])
+app.include_router(feedback.router, prefix="/v1")
 app.include_router(deals.router, prefix="/v1")
 app.include_router(deals_public.router, prefix="/v1")
 app.include_router(deals_internal.router)
