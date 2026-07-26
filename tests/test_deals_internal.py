@@ -4,7 +4,10 @@ Deal rows aren't covered by conftest's autouse `_cleanup_test_users` — see
 test_deals_crud.py's module docstring for why this file needs its own
 `_cleanup_test_deals` fixture (FK to users(firebase_uid), teardown order).
 
-These endpoints only check ApiKeyDep, not Firebase auth — `client` (plain,
+These endpoints check CronKeyDep (X-Deals-Cron-Key), not Firebase auth and
+not Authorization: Bearer — see app/dependencies.py::verify_cron_key for why
+not the latter (Cloud Scheduler reserves that header name for its own OAuth/
+OIDC oneof and silently drops a manually-set value). `client` (plain,
 unauthenticated TestClient) is what calls them; `client_as(USER_A)` is only
 used to create the deal via the real, Firebase-auth-protected /v1/deals.
 """
@@ -18,7 +21,7 @@ import pytest
 from app.dependencies import get_signfinder
 from tests.conftest import USER_A
 
-_API_KEY_HEADERS = {"Authorization": "Bearer test_key_123"}
+_CRON_KEY_HEADERS = {"X-Deals-Cron-Key": "test_key_123"}
 
 _FAKE_ORIGINAL_PDF_B64 = base64.b64encode(b"%PDF-1.4 fake original").decode()
 _FAKE_SIGNED_PDF_B64 = base64.b64encode(b"%PDF-1.4 fake initiator-signed").decode()
@@ -92,7 +95,7 @@ def test_expire_sweep_marks_expired_and_deletes_files(client, client_as, db_exec
     assert sf.storage.exists(row_before["original_pdf_path"])
     assert sf.storage.exists(row_before["initiator_signed_pdf_path"])
 
-    r = client.post("/internal/deals/expire-sweep", headers=_API_KEY_HEADERS)
+    r = client.post("/internal/deals/expire-sweep", headers=_CRON_KEY_HEADERS)
     assert r.status_code == 200
     body = r.json()
     assert body["processed"] >= 1
@@ -113,7 +116,7 @@ def test_expire_sweep_signed_deal_keeps_status(client, client_as, db_exec):
     db_exec(_set_status, deal_id, "signed")
     db_exec(_backdate_expiry, deal_id, hours=1)
 
-    r = client.post("/internal/deals/expire-sweep", headers=_API_KEY_HEADERS)
+    r = client.post("/internal/deals/expire-sweep", headers=_CRON_KEY_HEADERS)
     assert r.status_code == 200
 
     row = db_exec(_fetch_deal_row, deal_id)
@@ -128,11 +131,11 @@ def test_expire_sweep_idempotent(client, client_as, db_exec):
     deal_id = _create_deal(client_as)["id"]
     db_exec(_backdate_expiry, deal_id, hours=1)
 
-    r1 = client.post("/internal/deals/expire-sweep", headers=_API_KEY_HEADERS)
+    r1 = client.post("/internal/deals/expire-sweep", headers=_CRON_KEY_HEADERS)
     assert r1.status_code == 200
     assert r1.json()["processed"] >= 1
 
-    r2 = client.post("/internal/deals/expire-sweep", headers=_API_KEY_HEADERS)
+    r2 = client.post("/internal/deals/expire-sweep", headers=_CRON_KEY_HEADERS)
     assert r2.status_code == 200
 
     row = db_exec(_fetch_deal_row, deal_id)
@@ -144,7 +147,7 @@ def test_purge_old_deletes_row(client, client_as, db_exec):
     deal_id = _create_deal(client_as)["id"]
     db_exec(_backdate_expiry, deal_id, days=31)
 
-    r = client.post("/internal/deals/purge-old", headers=_API_KEY_HEADERS)
+    r = client.post("/internal/deals/purge-old", headers=_CRON_KEY_HEADERS)
     assert r.status_code == 200
     assert r.json()["deleted"] >= 1
 
@@ -152,12 +155,10 @@ def test_purge_old_deletes_row(client, client_as, db_exec):
     assert row is None
 
 
-def test_internal_endpoints_require_api_key(client):
-    # HTTPBearer() without a header raises 401 here (empirically, per CI —
-    # not the 403-when-entirely-missing behavior of older FastAPI/Starlette
-    # versions referenced in the reading gate; this project pins a version
-    # where a missing Authorization header and a wrong one both surface as
-    # 401 through this dependency chain).
+def test_internal_endpoints_require_cron_key(client):
+    # verify_cron_key defaults a missing header to "" via Header(""), which
+    # never equals the real key — deterministically 401, same code path as
+    # a present-but-wrong value (no HTTPBearer auto_error ambiguity here).
     r = client.post("/internal/deals/expire-sweep")
     assert r.status_code == 401
 

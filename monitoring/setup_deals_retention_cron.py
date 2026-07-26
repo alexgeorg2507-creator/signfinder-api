@@ -1,8 +1,23 @@
 """
-Генерирует команды `gcloud scheduler jobs create http` для двух задач Deal
+Генерирует команды `gcloud scheduler jobs update http` для двух задач Deal
 Cycle E5 retention/cleanup (DEAL_CYCLE_SPEC.md §8 E5):
   - deals-expire-sweep — каждый час, чистит файлы истёкших сделок
   - deals-purge-old    — раз в сутки (03:00 UTC), удаляет записи старше 30 дней
+
+TASK_e5_scheduler_auth_followup.md: заголовок Authorization не доходит до
+эндпоинта — Cloud Scheduler резервирует это имя под собственный
+oauth_token/oidc_token oneof в HttpTarget и молча обнуляет значение,
+переданное через --headers, если ни один из них не задан (подтверждено
+Google Cloud API reference, HttpTarget.headers field description). Решение —
+свой заголовок X-Deals-Cron-Key вместо Authorization (тот же секрет
+api-key/API_KEY, только другое имя заголовка); эндпоинты теперь проверяют
+его через CronKeyDep (app/dependencies.py::verify_cron_key), не ApiKeyDep.
+
+Использует `update http`, не `create http` — задания уже существуют
+(созданы раньше с неработавшим Authorization-заголовком), `create` упадёт
+с "already exists". Если задания почему-то нет — команда ниже с `create`
+вместо `update` (тот же --update-headers меняется на --headers) тоже
+приведена.
 
 Этот скрипт НИЧЕГО не выполняет сам — только печатает готовые команды.
 Значение API_KEY нигде не появляется здесь буквально: команды используют
@@ -54,10 +69,21 @@ def print_commands(env: str) -> None:
     api_key_substitution = (
         f"$(gcloud secrets versions access latest --secret=api-key --project={project})"
     )
+    header_value = f"X-Deals-Cron-Key={api_key_substitution}"
 
     print(f"\n# --- {env} ({project}) ---------------------------------------")
     for job in _JOBS:
         print(f"\n# {job['description']}")
+        print(
+            f"# Job already exists (created earlier with the broken Authorization header) — update it:"
+        )
+        print(
+            f"gcloud scheduler jobs update http {job['name']} "
+            f"--project={project} "
+            f"--location={_LOCATION} "
+            f'--update-headers="{header_value}"'
+        )
+        print(f"# If the job doesn't exist for some reason, create it instead:")
         print(
             f"gcloud scheduler jobs create http {job['name']} "
             f"--project={project} "
@@ -65,7 +91,7 @@ def print_commands(env: str) -> None:
             f'--schedule="{job["schedule"]}" '
             f'--uri="{api_url}{job["path"]}" '
             f"--http-method=POST "
-            f'--headers="Authorization=Bearer {api_key_substitution}" '
+            f'--headers="{header_value}" '
             f'--time-zone="UTC"'
         )
 
