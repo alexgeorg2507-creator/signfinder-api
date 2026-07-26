@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -293,6 +294,15 @@ async def get_public_final_pdf(request: Request, share_token: str, sf: SignFinde
     )
 
 
+# Cyrillic-capable TTF for the legal-trail block — the PDF base-14 fonts
+# (incl. "helv") are WinAnsi/Latin-only and silently render Cyrillic as "?".
+# fonts-liberation is already an image dependency for the DOCX->PDF path
+# (see Dockerfile); its Sans face covers Cyrillic. Falls back to "helv" if
+# the file isn't there (e.g. a different base image) rather than failing
+# the whole sign transaction over cosmetic formatting.
+_LEGAL_BLOCK_FONTFILE = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+
+
 def _append_legal_block(
     pdf_bytes: bytes,
     deal_id: UUID,
@@ -327,12 +337,16 @@ def _append_legal_block(
         "─────────────────────────────────────────────────────────"
     )
 
+    has_cyrillic_font = os.path.exists(_LEGAL_BLOCK_FONTFILE)
+
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     try:
         page = doc.new_page()
         page.insert_textbox(
             fitz.Rect(50, 50, page.rect.width - 50, page.rect.height - 50),
-            text, fontsize=10, fontname="helv",
+            text, fontsize=10,
+            fontname="legalblock" if has_cyrillic_font else "helv",
+            fontfile=_LEGAL_BLOCK_FONTFILE if has_cyrillic_font else None,
         )
         out = doc.tobytes()
     finally:
