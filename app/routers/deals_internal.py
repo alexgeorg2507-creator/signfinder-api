@@ -1,7 +1,13 @@
 """Internal /internal/deals/* endpoints — Deal Cycle E5 retention/cleanup.
 
-Protected by ApiKeyDep (same mechanism as /v1/signers/{tmp}/signature/process),
-called by Cloud Scheduler jobs (see monitoring/setup_deals_retention_cron.py).
+Protected by CronKeyDep (X-Deals-Cron-Key header, same API_KEY secret as
+ApiKeyDep elsewhere) — NOT ApiKeyDep/Authorization, see CronKeyDep's
+docstring in app/dependencies.py for why: Cloud Scheduler HTTP targets
+reserve the "Authorization" header name for their own oauth_token/oidc_token
+oneof and silently drop a manually-set value there
+(TASK_e5_scheduler_auth_followup.md).
+
+Called by Cloud Scheduler jobs (see monitoring/setup_deals_retention_cron.py).
 Not registered under /v1 — Cloud Scheduler hits the raw Cloud Run URL directly,
 bypassing the Firebase Hosting /api-prefix-stripping middleware entirely (that
 middleware only strips a prefix Hosting itself adds on proxied requests).
@@ -19,7 +25,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter
 
 from app.db import get_pool
-from app.dependencies import ApiKeyDep, SignFinderDep
+from app.dependencies import CronKeyDep, SignFinderDep
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Internal"])
@@ -33,7 +39,7 @@ def _now() -> datetime:
 
 
 @router.post("/internal/deals/expire-sweep", include_in_schema=False)
-async def expire_sweep(_: ApiKeyDep, sf: SignFinderDep) -> dict:
+async def expire_sweep(_: CronKeyDep, sf: SignFinderDep) -> dict:
     """Hourly: purge files for deals past expires_at, mark unfinished ones expired.
 
     WHERE expires_at < now() AND at least one PDF path still set — idempotent
@@ -101,7 +107,7 @@ async def expire_sweep(_: ApiKeyDep, sf: SignFinderDep) -> dict:
 
 
 @router.post("/internal/deals/purge-old", include_in_schema=False)
-async def purge_old(_: ApiKeyDep) -> dict:
+async def purge_old(_: CronKeyDep) -> dict:
     """Daily: hard-delete deal rows whose files were purged 30+ days ago.
 
     No status filter — expire-sweep already unconditionally nulled every
