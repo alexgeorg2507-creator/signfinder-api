@@ -11,6 +11,7 @@ used to create the deal via the real, Firebase-auth-protected /v1/deals.
 from __future__ import annotations
 
 import base64
+import json
 
 import pytest
 
@@ -69,7 +70,17 @@ async def _set_status(conn, deal_id: str, status: str) -> None:
 
 
 async def _fetch_deal_row(conn, deal_id: str):
-    return await conn.fetchrow("SELECT * FROM deals WHERE id = $1", deal_id)
+    """Plain dict, not an asyncpg.Record — this connection (opened directly by
+    `db_exec`, not through the app's pool) has no jsonb type codec registered
+    (see app/db.py::_register_codecs, only applied to the app's own pool), so
+    `audit_log` comes back as a raw JSON string here and needs decoding."""
+    row = await conn.fetchrow("SELECT * FROM deals WHERE id = $1", deal_id)
+    if row is None:
+        return None
+    data = dict(row)
+    if isinstance(data.get("audit_log"), str):
+        data["audit_log"] = json.loads(data["audit_log"])
+    return data
 
 
 def test_expire_sweep_marks_expired_and_deletes_files(client, client_as, db_exec):
@@ -142,8 +153,13 @@ def test_purge_old_deletes_row(client, client_as, db_exec):
 
 
 def test_internal_endpoints_require_api_key(client):
+    # HTTPBearer() without a header raises 401 here (empirically, per CI —
+    # not the 403-when-entirely-missing behavior of older FastAPI/Starlette
+    # versions referenced in the reading gate; this project pins a version
+    # where a missing Authorization header and a wrong one both surface as
+    # 401 through this dependency chain).
     r = client.post("/internal/deals/expire-sweep")
-    assert r.status_code == 403
+    assert r.status_code == 401
 
     r = client.post("/internal/deals/purge-old")
-    assert r.status_code == 403
+    assert r.status_code == 401
