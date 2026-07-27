@@ -71,3 +71,21 @@ def test_feedback_telegram_down_still_returns_200(client_as, monkeypatch, caplog
 
     assert r.status_code == 200
     assert any(rec.levelno >= logging.ERROR for rec in caplog.records)
+
+
+def test_feedback_strips_secret_whitespace(client_as, monkeypatch):
+    """Regression: a secret provisioned via `"value" | gcloud secrets create
+    ... --data-file=-` in PowerShell picks up a trailing CRLF from the pipe.
+    Observed live on signfinder-cab-test: httpx.InvalidURL on a bare '\\r'
+    right after the token in the request URL."""
+    monkeypatch.setenv("TG_FEEDBACK_BOT_TOKEN", "test-bot-token\r\n")
+    monkeypatch.setenv("TG_FEEDBACK_CHAT_ID", "12345\r\n")
+    calls: list = []
+    _patch_telegram(monkeypatch, calls=calls)
+
+    r = client_as(USER_A).post("/v1/feedback", json=_PAYLOAD)
+    assert r.status_code == 200
+
+    assert len(calls) == 1
+    assert calls[0]["url"] == "https://api.telegram.org/bottest-bot-token/sendMessage"
+    assert calls[0]["json"]["chat_id"] == "12345"

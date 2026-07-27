@@ -61,8 +61,14 @@ async def submit_feedback(body: FeedbackRequest, user: UserDep) -> dict:
     email = user.get("email") or user["firebase_uid"]
     text = _format_message(email, body)
 
-    bot_token = os.environ.get("TG_FEEDBACK_BOT_TOKEN")
-    chat_id = os.environ.get("TG_FEEDBACK_CHAT_ID")
+    # .strip(): a secret provisioned via `"value" | gcloud secrets create
+    # ... --data-file=-` in PowerShell picks up a trailing CRLF from the
+    # pipe (observed live: httpx.InvalidURL on a bare \r right after the
+    # token) — stripping here means a stray newline in how a secret was
+    # created can never break the call again, regardless of provisioning
+    # method.
+    bot_token = (os.environ.get("TG_FEEDBACK_BOT_TOKEN") or "").strip()
+    chat_id = (os.environ.get("TG_FEEDBACK_CHAT_ID") or "").strip()
     if not bot_token or not chat_id:
         logger.error("Feedback not delivered: TG_FEEDBACK_BOT_TOKEN/TG_FEEDBACK_CHAT_ID not configured")
         return {"status": "received"}
