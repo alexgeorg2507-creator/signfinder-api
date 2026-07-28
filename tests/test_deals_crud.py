@@ -65,6 +65,21 @@ def test_create_deal_from_signed_pdf(client_as):
     assert abs((expires_at - created_at) - timedelta(days=7)) < timedelta(seconds=5)
 
 
+def test_create_deal_captures_initiator_ip_ua(client_as):
+    """E7, DEAL_CYCLE_SPEC.md §7/§9 criterion 8 — the legal-trail block needs
+    the initiator's ip/ua too, not just the counterparty's."""
+    c = client_as(USER_A)
+    r = c.post("/v1/deals", json=_deal_payload())
+    assert r.status_code == 201
+    deal_id = r.json()["id"]
+
+    r = c.get(f"/v1/deals/{deal_id}")
+    assert r.status_code == 200
+    created_event = next(e for e in r.json()["audit_log"] if e["event"] == "created")
+    assert created_event["ip"]
+    assert created_event["ua"]
+
+
 def test_list_deals_own_only(client_as):
     a = client_as(USER_A)
     r = a.post("/v1/deals", json=_deal_payload())

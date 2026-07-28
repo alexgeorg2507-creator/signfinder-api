@@ -150,6 +150,49 @@ def test_sign_valid_updates_status_and_creates_final_pdf(client_as, client, monk
     assert r.content.startswith(b"%PDF")
 
 
+def test_final_pdf_legal_block_has_initiator_ip_ua(client_as, client, monkeypatch):
+    """E7, DEAL_CYCLE_SPEC.md §7/§9 criterion 8 — legal-trail text actually
+    contains the initiator's own ip, not just the counterparty's (real text
+    extraction via fitz, not just "PDF is valid").
+
+    Uses a distinct X-Forwarded-For for the initiator's create-deal request
+    so its ip differs from the counterparty's (TestClient's default
+    "testclient" for both actors would otherwise make the two identical and
+    the assertion meaningless). Doesn't assert on the Cyrillic label text
+    itself — _append_legal_block falls back to the Latin-only "helv" font
+    when the Liberation Sans TTF isn't on PATH (see _LEGAL_BLOCK_FONTFILE),
+    which is true on a bare CI runner/local Windows box vs the Docker image,
+    so Cyrillic would render as "?" there through no fault of the ip/ua fix.
+    """
+    _patch_sign_pipeline(monkeypatch)
+    c = client_as(USER_A)
+    r = c.post("/v1/deals", json=_deal_payload(), headers={"X-Forwarded-For": "203.0.113.5"})
+    assert r.status_code == 201
+    deal = r.json()
+    created_event = next(e for e in deal["audit_log"] if e["event"] == "created")
+    assert created_event["ip"] == "203.0.113.5"
+
+    r = c.post(f"/v1/deals/{deal['id']}/mark-shared", json={"channel": "copy_link"})
+    assert r.status_code == 200
+    deal = r.json()
+
+    r = client.post(
+        f"/v1/public/deals/{deal['share_token']}/sign",
+        json={"signature_png_b64": TINY_PNG_B64, "consent_pep": True, "signature_source": "file"},
+    )
+    assert r.status_code == 200
+
+    r = client.get(f"/v1/public/deals/{deal['share_token']}/final-pdf")
+    assert r.status_code == 200
+
+    doc = fitz.open(stream=r.content, filetype="pdf")
+    try:
+        full_text = "".join(page.get_text() for page in doc)
+    finally:
+        doc.close()
+    assert "203.0.113.5" in full_text
+
+
 # ── threat model §6 (test_deals_public.py, per TASK_deal_cycle_E2.md §2.7) ──
 
 def test_public_view_no_sensitive_fields(client_as, client):

@@ -19,12 +19,13 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 import asyncpg
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
 
 from app.db import get_pool
 from app.dependencies import SignFinderDep
 from app.models.deal import Deal, DealCreate, DealListItem, MarkSharedRequest
+from app.rate_limit import get_client_ip
 from app.routers.me import UserDep, _get_usage_count, _MONTHLY_LIMIT
 from app.utils.share_token import generate_share_token
 
@@ -47,7 +48,7 @@ def _decode_pdf_b64(b64: str, field_name: str) -> bytes:
 
 
 @router.post("/deals", response_model=Deal, status_code=201)
-async def create_deal(body: DealCreate, user: UserDep, sf: SignFinderDep) -> Deal:
+async def create_deal(body: DealCreate, user: UserDep, sf: SignFinderDep, request: Request) -> Deal:
     """Create a Deal from an already-signed (by the initiator) contract.
 
     tenant_id comes only from the JWT (UserDep) — never from the body.
@@ -75,7 +76,10 @@ async def create_deal(body: DealCreate, user: UserDep, sf: SignFinderDep) -> Dea
 
     now = _now()
     expires_at = now + timedelta(days=_DEAL_TTL_DAYS)
-    audit_log = [{"event": "created", "at": now.isoformat(), "actor": "initiator"}]
+    audit_log = [{
+        "event": "created", "at": now.isoformat(), "actor": "initiator",
+        "ip": get_client_ip(request), "ua": request.headers.get("user-agent", "")[:300],
+    }]
 
     pool = get_pool()
     row = None
