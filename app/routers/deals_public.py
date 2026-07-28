@@ -189,6 +189,7 @@ async def sign_public_deal(request: Request, share_token: str, body: DealSignReq
         deal_id=deal["id"],
         initiator_email=deal["initiator_email"],
         initiator_signed_at=deal["created_at"],
+        initiator_audit_log=deal["audit_log"] or [],
         counterparty_ip=ip,
         counterparty_ua=ua,
         counterparty_signed_at=_now(),
@@ -303,11 +304,22 @@ async def get_public_final_pdf(request: Request, share_token: str, sf: SignFinde
 _LEGAL_BLOCK_FONTFILE = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
 
 
+def _initiator_ip_ua(audit_log: list[dict]) -> tuple[str, str]:
+    """The 'created' event in audit_log carries the initiator's ip/ua,
+    captured at POST /v1/deals time since E7. Deals created before this
+    fix don't have these fields — fall back to '—' rather than raise."""
+    for event in audit_log:
+        if event.get("event") == "created":
+            return event.get("ip") or "—", event.get("ua") or "—"
+    return "—", "—"
+
+
 def _append_legal_block(
     pdf_bytes: bytes,
     deal_id: UUID,
     initiator_email: str,
     initiator_signed_at,
+    initiator_audit_log: list[dict],
     counterparty_ip: str,
     counterparty_ua: str,
     counterparty_signed_at: datetime,
@@ -315,21 +327,23 @@ def _append_legal_block(
 ) -> bytes:
     """Append a legal-trail page (DEAL_CYCLE_SPEC.md §7).
 
-    TODO(E7): initiator IP/UA aren't in this block — POST /v1/deals (E1)
-    never captured them (the cabinet flow that creates a Deal isn't the
-    request that produced the signed PDF). Wording here is a draft, not
-    legal-reviewed (spec's own caveat) — E7 owns the final text + capturing
-    initiator IP/UA at Deal-creation time if that's still wanted.
+    E7: initiator IP/UA now come from the 'created' audit_log event
+    (captured at POST /v1/deals time, see deals.py::create_deal) — symmetric
+    with the counterparty side below. Wording here is a draft, not
+    legal-reviewed (spec's own caveat, see /pep-agreement).
     """
     import fitz
 
+    initiator_ip, initiator_ua = _initiator_ip_ua(initiator_audit_log)
+    initiator_ua_short = initiator_ua[:120]
     ua_short = (counterparty_ua or "")[:120]
     text = (
         "─────────────────────────────────────────────────────────\n"
         "Электронная подпись сформирована через SignFinder (signfinder.app).\n"
         "Простая электронная подпись (ПЭП) по соглашению сторон.\n\n"
         f"Инициатор: {initiator_email}\n"
-        f"  Подписано: {initiator_signed_at.astimezone(timezone.utc).isoformat()}\n\n"
+        f"  Подписано: {initiator_signed_at.astimezone(timezone.utc).isoformat()}, "
+        f"IP {initiator_ip}, UA {initiator_ua_short}\n\n"
         "Контрагент подписал по временной ссылке:\n"
         f"  Подписано: {counterparty_signed_at.isoformat()}, IP {counterparty_ip}, UA {ua_short}\n"
         f"  Способ ввода подписи: {signature_source}\n\n"
