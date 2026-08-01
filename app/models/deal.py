@@ -37,6 +37,10 @@ class DealCreate(BaseModel):
     original_pdf_b64: str
     initiator_signed_pdf_b64: str
     saved_anchors: list[dict[str, Any]]  # тип якорей — как отдаёт /v1/me/analyze
+    # fix15 §3.1: original_pdf_path — сгенерированный deals/{id}/original.pdf,
+    # исходное имя файла нигде не хранилось. Nullable — старым сделкам
+    # неоткуда его взять.
+    original_filename: Optional[str] = None
 
 
 class Deal(BaseModel):
@@ -52,6 +56,7 @@ class Deal(BaseModel):
     share_channel_used: Optional[ShareChannel] = None
     audit_log: list[dict[str, Any]]
     has_final_pdf: bool
+    original_filename: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: dict) -> "Deal":
@@ -66,6 +71,7 @@ class Deal(BaseModel):
             share_channel_used=row["share_channel_used"],
             audit_log=row["audit_log"] or [],
             has_final_pdf=row["final_pdf_path"] is not None,
+            original_filename=row.get("original_filename"),
         )
 
 
@@ -77,6 +83,7 @@ class DealListItem(BaseModel):
     expires_at: datetime
     status: DealStatus
     share_channel_used: Optional[ShareChannel] = None
+    original_filename: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: dict) -> "DealListItem":
@@ -86,6 +93,7 @@ class DealListItem(BaseModel):
             expires_at=row["expires_at"],
             status=row["status"],
             share_channel_used=row["share_channel_used"],
+            original_filename=row.get("original_filename"),
         )
 
 
