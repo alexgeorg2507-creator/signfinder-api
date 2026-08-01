@@ -92,14 +92,14 @@ async def create_deal(body: DealCreate, user: UserDep, sf: SignFinderDep, reques
                     INSERT INTO deals (
                         id, initiator_tenant_id, created_at, expires_at, status,
                         share_token, original_pdf_path, initiator_signed_pdf_path,
-                        saved_anchors, audit_log
+                        saved_anchors, audit_log, original_filename
                     )
-                    VALUES ($1, $2, $3, $4, 'draft', $5, $6, $7, $8, $9)
+                    VALUES ($1, $2, $3, $4, 'draft', $5, $6, $7, $8, $9, $10)
                     RETURNING *
                     """,
                     deal_id, tenant_id, now, expires_at,
                     share_token, original_path, signed_path,
-                    body.saved_anchors, audit_log,
+                    body.saved_anchors, audit_log, body.original_filename,
                 )
                 break
             except asyncpg.UniqueViolationError:
@@ -121,14 +121,15 @@ async def list_deals(
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ) -> list[DealListItem]:
-    """List this initiator's deals, newest first."""
+    """List this initiator's deals, newest first. Hidden deals (fix15 §3.2 —
+    'x' in the UI, not a real delete) are excluded by default."""
     tenant_id = user["firebase_uid"]
     pool = get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
             SELECT * FROM deals
-            WHERE initiator_tenant_id = $1
+            WHERE initiator_tenant_id = $1 AND hidden_by_initiator = false
             ORDER BY created_at DESC
             LIMIT $2 OFFSET $3
             """,
@@ -186,6 +187,30 @@ async def mark_shared(deal_id: UUID, body: MarkSharedRequest, user: UserDep) -> 
                 raise HTTPException(status_code=404, detail="Сделка не найдена")
             raise HTTPException(status_code=409, detail="Сделка уже передана или в другом статусе")
 
+    return Deal.from_row(dict(row))
+
+
+@router.post("/deals/{deal_id}/hide", response_model=Deal)
+async def hide_deal(deal_id: UUID, user: UserDep) -> Deal:
+    """Hide a deal from 'Мои сделки' (fix15 §3.2) — sets hidden_by_initiator,
+    never deletes the row. The legal-trail evidence (E7 ip/ua for both
+    parties) and the 7-day retention (ADR-009) don't depend on whether the
+    initiator wants to see it in their list. Idempotent — hiding an
+    already-hidden deal just re-confirms the same state, no 409."""
+    tenant_id = user["firebase_uid"]
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE deals
+            SET hidden_by_initiator = true
+            WHERE id = $1 AND initiator_tenant_id = $2
+            RETURNING *
+            """,
+            deal_id, tenant_id,
+        )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Сделка не найдена")
     return Deal.from_row(dict(row))
 
 

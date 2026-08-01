@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+from enum import Enum
 from typing import Optional
 
 import httpx
@@ -26,16 +27,58 @@ _TELEGRAM_API_URL = "https://api.telegram.org/bot{token}/sendMessage"
 _TIMEOUT = 10.0
 
 
+class UsageType(str, Enum):
+    FREELANCER = "freelancer"
+    SMALL_BUSINESS = "small_business"
+    LEGAL_DEPT = "legal_dept"
+    OTHER = "other"
+
+
+class PremiumFeature(str, Enum):
+    LOCAL_DEPLOYMENT = "local_deployment"      # "Локальная установка — документы не покидают вашу инфраструктуру"
+    TWO_SIDED_SIGNING = "two_sided_signing"    # "Двустороннее подписание через сервис"
+    HIGHER_LIMITS = "higher_limits"            # "Расширенные лимиты объёма документов"
+    API_INTEGRATIONS = "api_integrations"      # "API/интеграции (Cursor, Claude Desktop и т.п.)"
+    TEAM_ACCESS = "team_access"                # "Командный доступ — несколько сотрудников на аккаунт"
+
+
+# fix15 §5.1: полная замена опросника — старая форма (feature_request/source)
+# ещё не была в реальном использовании (прод не задеплоен), мигрировать
+# нечего, старые поля убраны, а не оставлены рядом.
 class FeedbackRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    feature_request: str
-    source: Optional[str] = None
+    usage_type: Optional[UsageType] = None
+    premium_features: list[PremiumFeature] = []
+    premium_features_other: Optional[str] = None
     would_refer: Optional[bool] = None
     contact: Optional[str] = None
 
 
+_USAGE_TYPE_LABEL = {
+    UsageType.FREELANCER: "Фрилансер / ИП",
+    UsageType.SMALL_BUSINESS: "Малый бизнес",
+    UsageType.LEGAL_DEPT: "Юридический отдел / агентство",
+    UsageType.OTHER: "Другое",
+}
+
+_PREMIUM_FEATURE_LABEL = {
+    PremiumFeature.LOCAL_DEPLOYMENT: "Локальная установка",
+    PremiumFeature.TWO_SIDED_SIGNING: "Двустороннее подписание через сервис",
+    PremiumFeature.HIGHER_LIMITS: "Расширенные лимиты объёма документов",
+    PremiumFeature.API_INTEGRATIONS: "API/интеграции",
+    PremiumFeature.TEAM_ACCESS: "Командный доступ",
+}
+
+
 def _format_message(email: str, body: FeedbackRequest) -> str:
-    source = body.source.strip() if body.source and body.source.strip() else "не указано"
+    usage_type = _USAGE_TYPE_LABEL[body.usage_type] if body.usage_type else "не указано"
+
+    feature_labels = [_PREMIUM_FEATURE_LABEL[f] for f in body.premium_features]
+    other = body.premium_features_other.strip() if body.premium_features_other and body.premium_features_other.strip() else ""
+    if other:
+        feature_labels.append(f"другое: {other}")
+    premium_features = ", ".join(feature_labels) if feature_labels else "не указано"
+
     if body.would_refer is None:
         would_refer = "не отвечено"
     else:
@@ -45,8 +88,8 @@ def _format_message(email: str, body: FeedbackRequest) -> str:
     return (
         "💬 Фидбек SignFinder\n"
         f"От: {email}\n"
-        f"За какую фичу готов платить: {body.feature_request}\n"
-        f"Как узнал о SignFinder: {source}\n"
+        f"Использует как: {usage_type}\n"
+        f"Готов платить за: {premium_features}\n"
         f"Порекомендовал бы коллеге: {would_refer}\n"
         f"Контакт: {contact}"
     )

@@ -9,8 +9,9 @@ import pytest
 from tests.conftest import USER_A
 
 _PAYLOAD = {
-    "feature_request": "Массовая отправка нескольким контрагентам сразу",
-    "source": "LinkedIn",
+    "usage_type": "freelancer",
+    "premium_features": ["higher_limits", "api_integrations"],
+    "premium_features_other": None,
     "would_refer": True,
     "contact": "alice@example.com",
 }
@@ -43,10 +44,40 @@ def test_feedback_sends_to_telegram_mocked(client_as, monkeypatch):
     assert calls[0]["url"] == "https://api.telegram.org/bottest-bot-token/sendMessage"
     assert calls[0]["json"]["chat_id"] == "12345"
     text = calls[0]["json"]["text"]
-    assert _PAYLOAD["feature_request"] in text
-    assert "LinkedIn" in text
+    assert "Фрилансер" in text
+    assert "Расширенные лимиты" in text
+    assert "API/интеграции" in text
     assert "да" in text
     assert "alice@example.com" in text
+
+
+def test_feedback_premium_features_other_included(client_as, monkeypatch):
+    """§5.1: premium_features_other is always shown, not only gated on some
+    'other' checkbox — must reach the Telegram text verbatim."""
+    monkeypatch.setenv("TG_FEEDBACK_BOT_TOKEN", "test-bot-token")
+    monkeypatch.setenv("TG_FEEDBACK_CHAT_ID", "12345")
+    calls: list = []
+    _patch_telegram(monkeypatch, calls=calls)
+
+    payload = dict(_PAYLOAD)
+    payload["premium_features"] = []
+    payload["premium_features_other"] = "Интеграция с 1С"
+
+    r = client_as(USER_A).post("/v1/feedback", json=payload)
+    assert r.status_code == 200
+    assert "Интеграция с 1С" in calls[0]["json"]["text"]
+
+
+def test_feedback_all_fields_optional(client_as, monkeypatch):
+    """Every field is Optional/defaulted — a fully empty submission (e.g. the
+    frontend somehow bypasses its own disabled-until-filled guard) must still
+    be accepted, not 422."""
+    monkeypatch.setenv("TG_FEEDBACK_BOT_TOKEN", "test-bot-token")
+    monkeypatch.setenv("TG_FEEDBACK_CHAT_ID", "12345")
+    _patch_telegram(monkeypatch)
+
+    r = client_as(USER_A).post("/v1/feedback", json={})
+    assert r.status_code == 200
 
 
 def test_feedback_requires_auth(client):
