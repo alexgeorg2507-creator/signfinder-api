@@ -6,6 +6,7 @@ DealPublicView, DealSignRequest, без auth, см. app/routers/deals_public.py.
 """
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from enum import Enum
 from typing import Any, Literal, Optional
@@ -13,7 +14,21 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-_SHARE_URL_BASE = "https://signfinder.app/sign"
+# ENVIRONMENT читается из Cloud Run env var (--set-env-vars в
+# cloudbuild-test.yaml/cloudbuild-prod.yaml) — уже задан, заводить новую
+# переменную не нужно. Значение на прод — "production" (не "prod"!), см.
+# cloudbuild-prod.yaml — фикс TASK_fix15.md §1.
+_WEB_BASE_URLS = {
+    "test": "https://signfinder-cab-test.web.app",
+    "production": "https://signfinder.app",
+}
+
+
+def _share_url_base() -> str:
+    # Читается на каждый вызов (не модуль-level константа) — ENVIRONMENT
+    # не меняется в реальном рантайме Cloud Run, но так это тестируемо
+    # через monkeypatch без танцев с importlib.reload.
+    return _WEB_BASE_URLS.get(os.environ.get("ENVIRONMENT", "production"), "https://signfinder.app") + "/sign"
 
 
 class DealStatus(str, Enum):
@@ -67,7 +82,7 @@ class Deal(BaseModel):
             expires_at=row["expires_at"],
             status=row["status"],
             share_token=row["share_token"],
-            share_url=f"{_SHARE_URL_BASE}/{row['share_token']}",
+            share_url=f"{_share_url_base()}/{row['share_token']}",
             share_channel_used=row["share_channel_used"],
             audit_log=row["audit_log"] or [],
             has_final_pdf=row["final_pdf_path"] is not None,
