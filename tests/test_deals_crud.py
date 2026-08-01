@@ -65,6 +65,25 @@ def test_create_deal_from_signed_pdf(client_as):
     assert abs((expires_at - created_at) - timedelta(days=7)) < timedelta(seconds=5)
 
 
+def test_share_url_reflects_environment(client_as, monkeypatch):
+    """TASK_fix15.md §1 (P0) — share_url must point at the environment the
+    API is actually running in, not a hardcoded prod URL. Cloud Run sets
+    ENVIRONMENT=test on test and ENVIRONMENT=production (not "prod"!) on
+    prod — both real values from cloudbuild-test.yaml/cloudbuild-prod.yaml,
+    not guessed."""
+    c = client_as(USER_A)
+
+    monkeypatch.setenv("ENVIRONMENT", "test")
+    r = c.post("/v1/deals", json=_deal_payload())
+    assert r.status_code == 201
+    assert r.json()["share_url"].startswith("https://signfinder-cab-test.web.app/sign/")
+
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    r = c.post("/v1/deals", json=_deal_payload())
+    assert r.status_code == 201
+    assert r.json()["share_url"].startswith("https://signfinder.app/sign/")
+
+
 def test_create_deal_captures_initiator_ip_ua(client_as):
     """E7, DEAL_CYCLE_SPEC.md §7/§9 criterion 8 — the legal-trail block needs
     the initiator's ip/ua too, not just the counterparty's."""
