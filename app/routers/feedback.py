@@ -35,23 +35,27 @@ class UsageType(str, Enum):
 
 
 class PremiumFeature(str, Enum):
-    LOCAL_DEPLOYMENT = "local_deployment"      # "Локальная установка — документы не покидают вашу инфраструктуру"
-    TWO_SIDED_SIGNING = "two_sided_signing"    # "Двустороннее подписание через сервис"
-    HIGHER_LIMITS = "higher_limits"            # "Расширенные лимиты объёма документов"
-    API_INTEGRATIONS = "api_integrations"      # "API/интеграции (Cursor, Claude Desktop и т.п.)"
-    TEAM_ACCESS = "team_access"                # "Командный доступ — несколько сотрудников на аккаунт"
+    LOCAL_DEPLOYMENT = "local_deployment"          # "Локальная установка — документы не покидают вашу инфраструктуру"
+    HIGHER_LIMITS = "higher_limits"                # "Расширенные лимиты объёма документов"
+    API_INTEGRATIONS = "api_integrations"          # "API/интеграции (Cursor, Claude Desktop и т.п.)"
+    MAILBOX_INTEGRATION = "mailbox_integration"    # "Интеграция с почтовым ящиком и обработка в фоновом режиме"
 
 
 # fix15 §5.1: полная замена опросника — старая форма (feature_request/source)
 # ещё не была в реальном использовании (прод не задеплоен), мигрировать
 # нечего, старые поля убраны, а не оставлены рядом.
+# fix17 §3: contact убран (email уже приходит из UserDep, спрашивать
+# повторно то что уже есть — плохой UX); TWO_SIDED_SIGNING убран (это уже
+# реализованный функционал, спрашивать готовность платить за то что уже
+# есть бессмысленно); TEAM_ACCESS -> MAILBOX_INTEGRATION (проверяем спрос
+# на IMAP-агента, SignFinder_Concept_v2_0.md §12.3, до реализации);
+# would_refer -> has_referred — вопрос про факт, не намерение.
 class FeedbackRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     usage_type: Optional[UsageType] = None
     premium_features: list[PremiumFeature] = []
     premium_features_other: Optional[str] = None
-    would_refer: Optional[bool] = None
-    contact: Optional[str] = None
+    has_referred: Optional[bool] = None
 
 
 _USAGE_TYPE_LABEL = {
@@ -63,10 +67,9 @@ _USAGE_TYPE_LABEL = {
 
 _PREMIUM_FEATURE_LABEL = {
     PremiumFeature.LOCAL_DEPLOYMENT: "Локальная установка",
-    PremiumFeature.TWO_SIDED_SIGNING: "Двустороннее подписание через сервис",
     PremiumFeature.HIGHER_LIMITS: "Расширенные лимиты объёма документов",
     PremiumFeature.API_INTEGRATIONS: "API/интеграции",
-    PremiumFeature.TEAM_ACCESS: "Командный доступ",
+    PremiumFeature.MAILBOX_INTEGRATION: "Интеграция с почтовым ящиком и обработка в фоновом режиме",
 }
 
 
@@ -79,19 +82,17 @@ def _format_message(email: str, body: FeedbackRequest) -> str:
         feature_labels.append(f"другое: {other}")
     premium_features = ", ".join(feature_labels) if feature_labels else "не указано"
 
-    if body.would_refer is None:
-        would_refer = "не отвечено"
+    if body.has_referred is None:
+        has_referred = "не отвечено"
     else:
-        would_refer = "да" if body.would_refer else "нет"
-    contact = body.contact.strip() if body.contact and body.contact.strip() else "не указано"
+        has_referred = "да" if body.has_referred else "нет"
 
     return (
         "💬 Фидбек SignFinder\n"
         f"От: {email}\n"
         f"Использует как: {usage_type}\n"
         f"Готов платить за: {premium_features}\n"
-        f"Порекомендовал бы коллеге: {would_refer}\n"
-        f"Контакт: {contact}"
+        f"Уже порекомендовал коллеге: {has_referred}"
     )
 
 
