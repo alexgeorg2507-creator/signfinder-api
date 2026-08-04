@@ -12,8 +12,7 @@ _PAYLOAD = {
     "usage_type": "freelancer",
     "premium_features": ["higher_limits", "api_integrations"],
     "premium_features_other": None,
-    "would_refer": True,
-    "contact": "alice@example.com",
+    "has_referred": True,
 }
 
 
@@ -47,8 +46,8 @@ def test_feedback_sends_to_telegram_mocked(client_as, monkeypatch):
     assert "Фрилансер" in text
     assert "Расширенные лимиты" in text
     assert "API/интеграции" in text
-    assert "да" in text
-    assert "alice@example.com" in text
+    assert "Уже порекомендовал коллеге: да" in text
+    assert f"От: {USER_A}@test.local" in text
 
 
 def test_feedback_premium_features_other_included(client_as, monkeypatch):
@@ -78,6 +77,41 @@ def test_feedback_all_fields_optional(client_as, monkeypatch):
 
     r = client_as(USER_A).post("/v1/feedback", json={})
     assert r.status_code == 200
+
+
+def test_feedback_contact_field_removed_422(client_as):
+    """fix17 §3.1: contact is gone from the model — email already comes from
+    UserDep (see 'От: {email}' assertion above), asking for it again was
+    redundant. A payload still carrying it must 422, not silently drop it."""
+    payload = dict(_PAYLOAD)
+    payload["contact"] = "someone@example.com"
+    r = client_as(USER_A).post("/v1/feedback", json=payload)
+    assert r.status_code == 422
+
+
+def test_feedback_removed_premium_feature_values_422(client_as):
+    """fix17 §3.2/§3.3: two_sided_signing (already-shipped functionality) and
+    team_access (replaced by mailbox_integration) are no longer valid enum
+    members."""
+    for removed_value in ("two_sided_signing", "team_access"):
+        payload = dict(_PAYLOAD)
+        payload["premium_features"] = [removed_value]
+        r = client_as(USER_A).post("/v1/feedback", json=payload)
+        assert r.status_code == 422, removed_value
+
+
+def test_feedback_mailbox_integration_label(client_as, monkeypatch):
+    """fix17 §3.3: mailbox_integration replaces team_access."""
+    monkeypatch.setenv("TG_FEEDBACK_BOT_TOKEN", "test-bot-token")
+    monkeypatch.setenv("TG_FEEDBACK_CHAT_ID", "12345")
+    calls: list = []
+    _patch_telegram(monkeypatch, calls=calls)
+
+    payload = dict(_PAYLOAD)
+    payload["premium_features"] = ["mailbox_integration"]
+    r = client_as(USER_A).post("/v1/feedback", json=payload)
+    assert r.status_code == 200
+    assert "Интеграция с почтовым ящиком и обработка в фоновом режиме" in calls[0]["json"]["text"]
 
 
 def test_feedback_requires_auth(client):
