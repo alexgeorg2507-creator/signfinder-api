@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from typing import Annotated, Any
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict
 
@@ -25,6 +25,7 @@ from app.auth import FirebaseToken
 from app.db import get_pool
 from app.dependencies import SignFinderDep
 from app.models.analysis import AnalysisResponse
+from app.rate_limit import get_client_ip
 from app.tenant_storage import TenantScopedStorage
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,13 @@ _MAX_SIG_PNG    = 500 * 1024         # 500 KB processed PNG
 _MAX_DOC_SIZE   = 5 * 1024 * 1024   # 5 MB cabinet doc limit
 _MAX_DOC_PAGES  = 10  # было 3
 _MONTHLY_LIMIT  = 100
+
+# TASK_fix21.md §2 — bump the date when terms.html/privacy.html/cookies.html
+# are republished with real content (owner fills in the [дата публикации]
+# placeholders, see TASK_fix20.md). A single constant, not hardcoded in
+# three places, so the "does the user need to re-accept" check has one
+# source of truth.
+CURRENT_TERMS_VERSION = "2026-08-01"
 
 _ALLOWED_DOC_EXTENSIONS = {"pdf", "doc", "docx"}
 _ALLOWED_DOC_MIME = {
@@ -60,7 +68,7 @@ async def _get_or_create_user(token: FirebaseToken) -> dict:
             ON CONFLICT (firebase_uid) DO UPDATE
               SET email = EXCLUDED.email,
                   email_verified = EXCLUDED.email_verified
-            RETURNING firebase_uid, email, email_verified, created_at
+            RETURNING firebase_uid, email, email_verified, created_at, terms_acceptance_log
             """,
             uid, email, verified,
         )
@@ -68,6 +76,57 @@ async def _get_or_create_user(token: FirebaseToken) -> dict:
 
 
 UserDep = Annotated[dict, Depends(_get_or_create_user)]
+
+
+def _terms_accepted(terms_acceptance_log: list) -> bool:
+    """Gate condition (TASK_fix21.md §2): not 'log is non-empty', but 'the
+    *last* entry's version matches CURRENT_TERMS_VERSION' — so a version
+    bump makes every existing acceptance stale and re-prompts, without
+    touching old entries (they stay in the log as history of what was
+    actually accepted when)."""
+    if not terms_acceptance_log:
+        return False
+    return terms_acceptance_log[-1].get("version") == CURRENT_TERMS_VERSION
+
+
+class MeOut(BaseModel):
+    email_verified: bool
+    terms_accepted: bool
+
+
+@router.get("/me", response_model=MeOut)
+async def get_me(user: UserDep) -> MeOut:
+    """Called right after login to decide which blocking gate (if any) the
+    frontend shows before the cabinet — email verification is checked
+    client-side via the Firebase SDK already, terms acceptance has no
+    client-side signal so it needs this round-trip."""
+    return MeOut(
+        email_verified=user["email_verified"],
+        terms_accepted=_terms_accepted(user["terms_acceptance_log"]),
+    )
+
+
+@router.post("/me/accept-terms", status_code=204)
+async def accept_terms(user: UserDep, request: Request) -> None:
+    uid = user["firebase_uid"]
+    entry = {
+        "version": CURRENT_TERMS_VERSION,
+        "accepted_at": datetime.now(timezone.utc).isoformat(),
+        "ip": get_client_ip(request),
+        "ua": request.headers.get("user-agent", "")[:300],
+    }
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        # [entry], not json.dumps([entry]): the pool's connections have a
+        # jsonb codec registered (app/db.py::_init_connection) that already
+        # serializes native Python objects for jsonb params - passing an
+        # already-dumped string here double-encodes it into a JSON string
+        # scalar, which || then appends as one opaque string element instead
+        # of the intended object (caught by test_accept_terms_records_ip_ua_in_log).
+        await conn.execute(
+            "UPDATE users SET terms_acceptance_log = terms_acceptance_log || $1::jsonb WHERE firebase_uid=$2",
+            [entry], uid,
+        )
 
 
 def _current_period() -> str:
