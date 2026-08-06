@@ -23,7 +23,7 @@ _API_PREFIX = "/api"
 # Dockerfile copies only app/ (no `pip install .` of this distribution), so
 # package metadata isn't registered in the production image — fall back to a
 # literal kept in sync with pyproject.toml's [project].version.
-_FALLBACK_API_VERSION = "1.19.10"
+_FALLBACK_API_VERSION = "1.20.0"
 try:
     _API_VERSION = _pkg_version("signfinder-api")
 except PackageNotFoundError:
