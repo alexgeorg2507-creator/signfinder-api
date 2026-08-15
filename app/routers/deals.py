@@ -92,14 +92,19 @@ async def create_deal(body: DealCreate, user: UserDep, sf: SignFinderDep, reques
                     INSERT INTO deals (
                         id, initiator_tenant_id, created_at, expires_at, status,
                         share_token, original_pdf_path, initiator_signed_pdf_path,
-                        saved_anchors, audit_log, original_filename
+                        saved_anchors, audit_log, original_filename, language
                     )
-                    VALUES ($1, $2, $3, $4, 'draft', $5, $6, $7, $8, $9, $10)
+                    VALUES ($1, $2, $3, $4, 'draft', $5, $6, $7, $8, $9, $10, $11)
                     RETURNING *
                     """,
                     deal_id, tenant_id, now, expires_at,
                     share_token, original_path, signed_path,
                     body.saved_anchors, audit_log, body.original_filename,
+                    # TASK_i18n_en.md §1: copied once from the initiator's own
+                    # language at creation time, never changes after - the
+                    # counterparty on /sign/{token} has no account to carry a
+                    # preference of their own, this is the only thing to inherit.
+                    user["language"],
                 )
                 break
             except asyncpg.UniqueViolationError:

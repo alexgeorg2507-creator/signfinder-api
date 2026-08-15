@@ -11,7 +11,9 @@ def test_get_me_new_user_terms_not_accepted(client_as):
     c = client_as(USER_A)
     r = c.get("/v1/me")
     assert r.status_code == 200
-    assert r.json() == {"email_verified": True, "terms_accepted": False}
+    # language: TASK_i18n_en.md §1 - not this test's concern, just don't
+    # hardcode the field away since it's a required part of the response now.
+    assert r.json() == {"email_verified": True, "terms_accepted": False, "language": "ru"}
 
 
 def test_accept_terms_then_get_me_shows_accepted(client_as):
