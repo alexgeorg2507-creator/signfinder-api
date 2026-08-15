@@ -139,6 +139,9 @@ class DealPublicView(BaseModel):
     counterparty_anchors: list[dict[str, Any]]
     has_pdf: bool
     has_final_pdf: bool
+    # TASK_i18n_en.md §4 — контрагент без аккаунта, наследует язык
+    # интерфейса от сделки (copy-once at create_deal time, see deals.py).
+    language: str
 
     @classmethod
     def from_row(cls, row: dict) -> "DealPublicView":
@@ -149,6 +152,7 @@ class DealPublicView(BaseModel):
             counterparty_anchors=row["saved_anchors"] or [],
             has_pdf=bool(row["initiator_signed_pdf_path"]),
             has_final_pdf=row["final_pdf_path"] is not None,
+            language=row.get("language") or "ru",
         )
 
 

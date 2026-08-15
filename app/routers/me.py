@@ -14,7 +14,7 @@ import base64
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
@@ -54,23 +54,33 @@ _ALLOWED_DOC_MIME = {
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-async def _get_or_create_user(token: FirebaseToken) -> dict:
-    """Upsert user on every request — idempotent, O(1) by PK."""
+async def _get_or_create_user(token: FirebaseToken, request: Request) -> dict:
+    """Upsert user on every request — idempotent, O(1) by PK.
+
+    TASK_i18n_en.md §1: language is set ONLY on the INSERT branch, from the
+    X-UI-Language header the frontend sends based on which URL prefix it
+    first loaded from (/en/app vs /app) — the ON CONFLICT DO UPDATE branch
+    deliberately does not touch it, so a later visit to plain /app by an
+    existing 'en' user can't clobber their saved preference back to 'ru'.
+    """
     uid: str = token["uid"]
     email: str = token.get("email", "")
     verified: bool = token.get("email_verified", False)
+    lang = request.headers.get("x-ui-language", "ru")
+    if lang not in ("ru", "en"):
+        lang = "ru"
     pool = get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            INSERT INTO users (firebase_uid, email, email_verified)
-            VALUES ($1, $2, $3)
+            INSERT INTO users (firebase_uid, email, email_verified, language)
+            VALUES ($1, $2, $3, $4)
             ON CONFLICT (firebase_uid) DO UPDATE
               SET email = EXCLUDED.email,
                   email_verified = EXCLUDED.email_verified
-            RETURNING firebase_uid, email, email_verified, created_at, terms_acceptance_log
+            RETURNING firebase_uid, email, email_verified, created_at, terms_acceptance_log, language
             """,
-            uid, email, verified,
+            uid, email, verified, lang,
         )
     return dict(row)
 
@@ -92,6 +102,7 @@ def _terms_accepted(terms_acceptance_log: list) -> bool:
 class MeOut(BaseModel):
     email_verified: bool
     terms_accepted: bool
+    language: str
 
 
 @router.get("/me", response_model=MeOut)
@@ -99,11 +110,33 @@ async def get_me(user: UserDep) -> MeOut:
     """Called right after login to decide which blocking gate (if any) the
     frontend shows before the cabinet — email verification is checked
     client-side via the Firebase SDK already, terms acceptance has no
-    client-side signal so it needs this round-trip."""
+    client-side signal so it needs this round-trip. Also returns the
+    stored language (TASK_i18n_en.md §1/§3) so a returning user's UI
+    language comes from the DB, not re-guessed from the URL every visit."""
     return MeOut(
         email_verified=user["email_verified"],
         terms_accepted=_terms_accepted(user["terms_acceptance_log"]),
+        language=user["language"],
     )
+
+
+class SetLanguageRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    language: Literal["ru", "en"]
+
+
+@router.put("/me/language", status_code=204)
+async def set_language(user: UserDep, body: SetLanguageRequest) -> None:
+    """Explicit language switch (TASK_i18n_en.md §3 toggle) — the only way
+    language changes after the first-ever login; _get_or_create_user's
+    upsert never touches it on later visits."""
+    uid = user["firebase_uid"]
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET language = $1 WHERE firebase_uid=$2",
+            body.language, uid,
+        )
 
 
 @router.post("/me/accept-terms", status_code=204)
